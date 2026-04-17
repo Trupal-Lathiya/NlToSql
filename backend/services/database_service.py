@@ -11,3 +11,48 @@
 #     invalid SQL, permission errors, or connection failures.
 #   - Provides a function to test the database connection on startup.
 # =============================================================================
+
+
+import pyodbc
+import logging
+from config import DB_SERVER, DB_NAME, DB_DRIVER
+
+logger = logging.getLogger(__name__)
+
+def get_connection():
+    conn_str = (
+        f"DRIVER={{{DB_DRIVER}}};"
+        f"SERVER={DB_SERVER};"
+        f"DATABASE={DB_NAME};"
+        f"Trusted_Connection=yes;"
+    )
+    return pyodbc.connect(conn_str)
+
+def test_connection() -> dict:
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT @@VERSION")
+        version = cursor.fetchone()[0]
+        conn.close()
+        logger.info("Database connection successful.")
+        return {"status": "success", "version": version}
+    except Exception as e:
+        logger.error(f"Database connection failed: {e}")
+        return {"status": "error", "message": str(e)}
+
+def execute_query(sql: str) -> dict:
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(sql)
+        columns = [col[0] for col in cursor.description]
+        rows = [list(row) for row in cursor.fetchall()]
+        conn.close()
+        return {"status": "success", "columns": columns, "rows": rows}
+    except Exception as e:
+        logger.error(f"Query execution failed: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+
