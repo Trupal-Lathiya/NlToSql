@@ -16,10 +16,12 @@
 fastapi
 uvicorn[standard]
 python-dotenv
-pinecone-client
+pinecone
 FlagEmbedding
 groq
 pyodbc
 pydantic
 python-multipart
-
+transformers==4.44.2 
+FlagEmbedding==1.2.11
+peft

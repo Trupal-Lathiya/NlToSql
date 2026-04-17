@@ -11,7 +11,6 @@
 # The embedding model is loaded once at startup and reused for efficiency.
 # =============================================================================
 
-
 from FlagEmbedding import BGEM3FlagModel
 from config import EMBEDDING_MODEL
 import logging
@@ -31,8 +30,5 @@ def embed_text(text: str) -> list[float]:
     return result["dense_vecs"][0].tolist()
 
 def embed_texts(texts: list[str]) -> list[list[float]]:
-    result = get_model().encode(texts, batch_size=12, max_length=8192, show_progress_bar=True)
+    result = get_model().encode(texts, batch_size=12, max_length=8192)  # removed show_progress_bar
     return [vec.tolist() for vec in result["dense_vecs"]]
-
-
-
