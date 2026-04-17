@@ -30,5 +30,5 @@ def embed_text(text: str) -> list[float]:
     return result["dense_vecs"][0].tolist()
 
 def embed_texts(texts: list[str]) -> list[list[float]]:
-    result = get_model().encode(texts, batch_size=12, max_length=8192)  # removed show_progress_bar
+    result = get_model().encode(texts, batch_size=12, max_length=8192)
     return [vec.tolist() for vec in result["dense_vecs"]]

@@ -47,7 +47,7 @@ def upsert_schemas(records: list[dict]) -> dict:
         logger.info(f"Upserted batch {i//100 + 1}: {len(vectors[i:i+100])} vectors")
     return {"total_vectors": len(vectors)}
 
-def search_similar(query_embedding: list[float], top_k: int = 5) -> list[dict]:
+def search_similar(query_embedding: list[float], top_k: int = 10) -> list[dict]:
     result = get_index().query(vector=query_embedding, top_k=top_k, include_metadata=True)
     return [{"id": m.id, "score": m.score, "metadata": m.metadata} for m in result.matches]
 
