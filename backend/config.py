@@ -25,6 +25,9 @@ DB_SERVER = os.getenv("DB_SERVER", "localhost\\SQLEXPRESS")
 DB_NAME = os.getenv("DB_NAME")
 DB_DRIVER = os.getenv("DB_DRIVER", "ODBC Driver 17 for SQL Server")
 
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
+
 
 
 SCHEMA_METADATA_PATH = os.path.join(
