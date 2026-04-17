@@ -12,3 +12,14 @@
 #   - pydantic: Data validation and request/response models
 #   - python-multipart: For handling form data in file uploads
 # =============================================================================
+
+fastapi
+uvicorn[standard]
+python-dotenv
+pinecone-client
+FlagEmbedding
+groq
+pyodbc
+pydantic
+python-multipart
+

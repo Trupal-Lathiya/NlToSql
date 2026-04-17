@@ -6,3 +6,22 @@
 # strings (SQL Server), embedding model settings, and other environment-
 # specific variables. All other modules import their config from here.
 # =============================================================================
+
+
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
+PINECONE_INDEX_NAME = os.getenv("PINECONE_INDEX_NAME", "nl2sql-schema")
+PINECONE_CLOUD = os.getenv("PINECONE_CLOUD", "aws")
+PINECONE_REGION = os.getenv("PINECONE_REGION", "us-east-1")
+
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3")
+EMBEDDING_DIMENSION = int(os.getenv("EMBEDDING_DIMENSION", "1024"))
+
+SCHEMA_METADATA_PATH = os.path.join(
+    os.path.dirname(__file__), "data", "schema_metadata.json"
+)
+
