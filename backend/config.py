@@ -21,6 +21,14 @@ PINECONE_REGION = os.getenv("PINECONE_REGION", "us-east-1")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3")
 EMBEDDING_DIMENSION = int(os.getenv("EMBEDDING_DIMENSION", "1024"))
 
+DB_SERVER = os.getenv("DB_SERVER", "localhost\\SQLEXPRESS")
+DB_NAME = os.getenv("DB_NAME")
+DB_DRIVER = os.getenv("DB_DRIVER", "ODBC Driver 17 for SQL Server")
+
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
+
+
 SCHEMA_METADATA_PATH = os.path.join(
     os.path.dirname(__file__), "data", "schema_metadata.json"
 )
