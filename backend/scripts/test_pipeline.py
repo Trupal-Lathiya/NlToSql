@@ -6,7 +6,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 
 from services.query_pipeline import run_pipeline
 
-nl_query = "give me all the username"
+nl_query = "Show me all AF devices with their IMEI and customer name"
 
 result = run_pipeline(nl_query)
 

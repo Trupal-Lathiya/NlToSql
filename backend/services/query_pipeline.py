@@ -43,7 +43,7 @@ def save_csv(columns: list, rows: list, filename: str) -> str:
     logger.info(f"CSV saved: {filepath}")
     return filepath
 
-def run_pipeline(nl_query: str, top_k: int = 5) -> dict:
+def run_pipeline(nl_query: str, top_k: int = 10) -> dict:
     try:
         # Step 1: Embed the NL query
         logger.info(f"Embedding query: {nl_query}")
