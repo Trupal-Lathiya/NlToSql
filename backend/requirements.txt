@@ -1,0 +1,14 @@
+# =============================================================================
+# requirements.txt - Python Dependencies
+# =============================================================================
+# This file lists all Python packages required to run the backend:
+#   - fastapi: Web framework for building the REST API
+#   - uvicorn: ASGI server to run the FastAPI application
+#   - python-dotenv: Loads environment variables from .env file
+#   - pinecone-client: SDK for interacting with Pinecone vector database
+#   - groq: SDK for interacting with Groq LLM API
+#   - sentence-transformers: For generating text embeddings from NL queries
+#   - pyodbc: ODBC connector for SQL Server database communication
+#   - pydantic: Data validation and request/response models
+#   - python-multipart: For handling form data in file uploads
+# =============================================================================

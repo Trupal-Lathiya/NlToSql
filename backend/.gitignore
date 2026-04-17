@@ -1,0 +1,12 @@
+# =============================================================================
+# .gitignore - Backend Git Ignore Rules
+# =============================================================================
+# Specifies files and directories that Git should ignore:
+#   - .env (contains sensitive API keys and credentials)
+#   - __pycache__/ (Python bytecode cache)
+#   - venv/ or .venv/ (Python virtual environment)
+#   - *.pyc (compiled Python files)
+#   - .idea/ or .vscode/ (IDE configuration files)
+# =============================================================================
+.env
+.env.example

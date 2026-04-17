@@ -1,0 +1,8 @@
+# =============================================================================
+# requirements.txt - Frontend Python Dependencies
+# =============================================================================
+# This file lists all Python packages required to run the Streamlit frontend:
+#   - streamlit: Python-based web UI framework for building the frontend
+#   - requests: For making HTTP calls to the FastAPI backend API
+#   - pandas: For formatting and displaying query results as tables
+# =============================================================================

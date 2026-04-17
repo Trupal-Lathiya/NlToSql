@@ -1,0 +1,15 @@
+# =============================================================================
+# .gitignore - Root-Level Git Ignore Rules
+# =============================================================================
+# Specifies files and directories that Git should ignore at the project root:
+#   - backend/.env (sensitive API keys and credentials)
+#   - __pycache__/ (Python bytecode cache directories)
+#   - venv/ or .venv/ (Python virtual environment)
+#   - *.pyc (compiled Python files)
+#   - node_modules/ (Node.js dependencies if any)
+#   - .idea/ or .vscode/ (IDE configuration files)
+#   - .DS_Store (macOS system files)
+# =============================================================================
+.env
+.env.example
+
