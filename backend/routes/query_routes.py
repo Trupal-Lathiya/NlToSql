@@ -9,3 +9,16 @@
 #   - GET /query/history : (Optional) Returns the history of past queries
 #     and their results for display in the frontend.
 # =============================================================================
+
+
+from fastapi import APIRouter
+from models.schemas import QueryRequest, QueryResponse, ErrorResponse
+from services.query_pipeline import run_pipeline
+
+router = APIRouter(prefix="/query", tags=["Query"])
+
+@router.post("", response_model=QueryResponse)
+def handle_query(request: QueryRequest):
+    result = run_pipeline(request.natural_language_query)
+    return result
+

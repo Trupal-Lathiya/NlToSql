@@ -13,3 +13,25 @@
 # Contains the BASE_URL configuration pointing to the backend server.
 # All functions include error handling for network/timeout failures.
 # =============================================================================
+
+
+import requests
+
+BASE_URL = "http://localhost:8000"
+
+def send_query(nl_query: str) -> dict:
+    try:
+        response = requests.post(
+            f"{BASE_URL}/query",
+            json={"natural_language_query": nl_query},
+            timeout=120
+        )
+        return response.json()
+    except requests.exceptions.Timeout:
+        return {"status": "error", "message": "Request timed out. The query took too long."}
+    except requests.exceptions.ConnectionError:
+        return {"status": "error", "message": "Cannot connect to backend. Is the server running?"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+

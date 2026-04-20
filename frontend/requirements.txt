@@ -6,3 +6,9 @@
 #   - requests: For making HTTP calls to the FastAPI backend API
 #   - pandas: For formatting and displaying query results as tables
 # =============================================================================
+
+
+streamlit
+requests
+pandas
+
