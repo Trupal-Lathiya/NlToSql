@@ -22,16 +22,14 @@ def render_results_table(columns: list, rows: list, total_row_count: int):
         return
 
     df = pd.DataFrame(rows, columns=columns)
-    
+
     st.markdown(f"**Showing {len(rows)} of {total_row_count} total rows**")
     st.dataframe(df, use_container_width=True)
 
     csv = df.to_csv(index=False).encode("utf-8")
     st.download_button(
-        label="Download CSV",
+        label="⬇️ Download CSV",
         data=csv,
         file_name="query_results.csv",
         mime="text/csv"
     )
-
-

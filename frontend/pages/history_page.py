@@ -19,21 +19,57 @@ from components.sql_display import render_sql_display
 from components.results_table import render_results_table
 
 def render():
-    st.title("Query History")
+    st.title("📜 Query History")
 
     if "history" not in st.session_state or not st.session_state.history:
-        st.info("No queries yet. Go to the Query page to get started.")
+        st.info("No queries yet. Go to the **Query** page to get started.")
         return
 
-    if st.button("Clear History"):
-        st.session_state.history = []
-        st.rerun()
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        search = st.text_input("🔎 Search history", placeholder="Filter by keyword...", label_visibility="collapsed")
+    with col2:
+        if st.button("🗑️ Clear All History", use_container_width=True):
+            st.session_state.history = []
+            st.rerun()
 
-    for i, result in enumerate(st.session_state.history):
-        with st.expander(f"Query {i+1}: {result['nl_query'][:80]}"):
-            st.markdown(f"**Question:** {result['nl_query']}")
-            st.markdown(f"**Summary:** {result.get('summary', '')}")
+    st.markdown(f"**{len(st.session_state.history)} total queries stored**")
+    st.divider()
+
+    filtered = st.session_state.history
+    if search.strip():
+        kw = search.strip().lower()
+        filtered = [
+            r for r in filtered
+            if kw in r.get("nl_query", "").lower()
+            or kw in r.get("sql", "").lower()
+            or kw in r.get("summary", "").lower()
+        ]
+        if not filtered:
+            st.warning(f"No results matching **'{search}'**.")
+            return
+
+    for i, result in enumerate(filtered):
+        timestamp = result.get("timestamp", "")
+        label = f"Query {i+1}: {result['nl_query'][:70]}{'...' if len(result['nl_query']) > 70 else ''}"
+        if timestamp:
+            label += f"  ·  🕒 {timestamp}"
+
+        with st.expander(label, expanded=False):
+            st.markdown(f"**❓ Question:** {result['nl_query']}")
+            if result.get("summary"):
+                st.markdown("**🤖 Answer:**")
+                st.markdown(result["summary"])
+            st.markdown(f"**📊 Rows returned:** {result.get('total_row_count', 'N/A')}")
+            if timestamp:
+                st.caption(f"🕒 Executed at: {timestamp}")
+
+            st.divider()
             render_sql_display(result["sql"], result["retrieved_tables"])
+
+            st.divider()
             render_results_table(result["columns"], result["rows"], result["total_row_count"])
 
-
+            if st.button("🗑️ Delete this entry", key=f"del_{i}"):
+                st.session_state.history = [r for r in st.session_state.history if r is not result]
+                st.rerun()

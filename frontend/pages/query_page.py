@@ -18,15 +18,17 @@ import streamlit as st
 from api_client import send_query
 from components.sql_display import render_sql_display
 from components.results_table import render_results_table
+from datetime import datetime
 
 def render():
     st.title("Ask Your Database")
-    st.markdown("Type a question in plain English and get results from your SQL Server database.")
+    st.markdown("Type a question in plain English and get SQL results instantly.")
 
     nl_query = st.text_area(
         "Your Question",
         placeholder="e.g. Show me all journeys with harsh braking events",
-        height=100
+        height=100,
+        key="query_input"
     )
 
     if st.button("Generate & Run", type="primary", use_container_width=True):
@@ -34,35 +36,26 @@ def render():
             st.warning("Please enter a question.")
             return
 
-        with st.spinner("Thinking... embedding → searching → generating SQL → executing..."):
+        with st.spinner("Embedding → Searching → Generating SQL → Executing..."):
             result = send_query(nl_query)
 
         if result.get("status") == "error":
-            st.error(f"Error: {result.get('message')}")
+            st.error(f"❌ {result.get('message')}")
             return
 
-        # Summary
-        st.success("Query executed successfully!")
-        st.markdown("#### Answer")
-        st.markdown(result.get("summary", ""))
+        result["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        st.divider()
-
-        # SQL + Tables
-        render_sql_display(result["sql"], result["retrieved_tables"])
-
-        st.divider()
-
-        # Results table
-        render_results_table(
-            result["columns"],
-            result["rows"],
-            result["total_row_count"]
-        )
-
-        # Save to session history
         if "history" not in st.session_state:
             st.session_state.history = []
         st.session_state.history.insert(0, result)
 
+        st.success("✅ Query executed successfully!")
 
+        st.markdown("#### 🤖 Answer")
+        st.markdown(result.get("summary", ""))
+
+        st.divider()
+        render_sql_display(result["sql"], result["retrieved_tables"])
+
+        st.divider()
+        render_results_table(result["columns"], result["rows"], result["total_row_count"])

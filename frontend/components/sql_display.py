@@ -11,15 +11,12 @@
 # Used by both query_page.py and history_page.py.
 # =============================================================================
 
-
 import streamlit as st
 
 def render_sql_display(sql: str, retrieved_tables: list):
-    st.markdown("#### Generated SQL")
+    st.markdown("#### 🧾 Generated SQL")
     st.code(sql, language="sql")
-    
-    with st.expander("Tables used from Pinecone"):
+
+    with st.expander("📋 Tables retrieved from Pinecone"):
         for table in retrieved_tables:
             st.markdown(f"- `{table}`")
-
-
