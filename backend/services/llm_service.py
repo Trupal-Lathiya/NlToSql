@@ -53,7 +53,7 @@ def generate_sql(nl_query: str, schema_context: str) -> dict:
             sql = sql.strip()
 
         if sql == "CANNOT_GENERATE":
-            return {"status": "error", "message": "Could not generate SQL for this query."}
+            return {"status": "error", "message": f"Could not generate SQL for this query. {sql}"}
 
         logger.info(f"Generated SQL: {sql}")
         return {"status": "success", "sql": sql}

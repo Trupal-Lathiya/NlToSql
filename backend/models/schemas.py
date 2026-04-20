@@ -15,14 +15,22 @@
 # =============================================================================
 
 
+# =============================================================================
+# models/schemas.py
+# =============================================================================
+
 from pydantic import BaseModel
-from typing import Optional, List, Any
+from typing import Optional, List, Any, Literal, Union
+
 
 class QueryRequest(BaseModel):
+    """Incoming natural language query"""
     natural_language_query: str
 
-class QueryResponse(BaseModel):
-    status: str
+
+class QuerySuccessResponse(BaseModel):
+    """Successful NL-to-SQL response"""
+    status: Literal["success"]
     nl_query: str
     sql: str
     retrieved_tables: List[str]
@@ -32,6 +40,30 @@ class QueryResponse(BaseModel):
     summary: str
     csv_path: Optional[str] = None
 
-class ErrorResponse(BaseModel):
-    status: str
+
+class QueryErrorResponse(BaseModel):
+    """Error response for /query endpoint"""
+    status: Literal["error"]
     message: str
+
+
+class ErrorResponse(BaseModel):
+    """General error response for other endpoints"""
+    status: Literal["error"] = "error"
+    message: str
+
+
+class SchemaIngestRequest(BaseModel):
+    table_name: str
+    columns: List[dict]
+    description: Optional[str] = None
+
+
+class SchemaIngestResponse(BaseModel):
+    status: Literal["success"] = "success"
+    message: str
+    table_name: str
+
+
+# Combined type for the /query endpoint
+QueryResponse = Union[QuerySuccessResponse, QueryErrorResponse]

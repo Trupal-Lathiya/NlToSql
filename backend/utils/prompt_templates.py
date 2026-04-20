@@ -26,8 +26,8 @@ Rules:
 - Always qualify column names with table names to avoid ambiguity (e.g., Asset.DescA).
 - Do NOT use any keywords as table aliases. Avoid using words like 'as', 'select', 'from', 'where', 'join', 'table', 'alias', 'key', 'id', 'name', etc. as aliases.
 - Use simple, short, non-keyword aliases only (like A1, B2, C3, T1, T2, etc.) if aliasing is needed.
-- If the question cannot be answered with the given schema, reply with: CANNOT_GENERATE
 """
+# - If the question cannot be answered with the given schema, reply with: CANNOT_GENERATE
 
 SQL_GENERATION_PROMPT = """Given the following database schema context:
 

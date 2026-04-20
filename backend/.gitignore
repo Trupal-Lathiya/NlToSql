@@ -9,5 +9,8 @@
 #   - .idea/ or .vscode/ (IDE configuration files)
 # =============================================================================
 .env
-.env.example
 venv
+
+
+__pycache__/
+data/exports/

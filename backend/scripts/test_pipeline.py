@@ -6,7 +6,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 
 from services.query_pipeline import run_pipeline
 
-nl_query = "Show me the top 50 journeys with the longest distance travelled"
+nl_query = "Show me all reports with their customer name and created by user"
 
 result = run_pipeline(nl_query)
 

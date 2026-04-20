@@ -106,5 +106,8 @@ def run_pipeline(nl_query: str, top_k: int = 10) -> dict:
         }
 
     except Exception as e:
-        logger.error(f"Pipeline failed: {e}")
-        return {"status": "error", "message": str(e)}
+        logger.error(f"Pipeline failed for query '{nl_query}': {e}", exc_info=True)
+        return {
+            "status": "error",
+            "message": f"Could not process your query. Error: {str(e)}"
+        }
