@@ -6,7 +6,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 
 from services.query_pipeline import run_pipeline
 
-nl_query = "Give me details of AFDevice including IMEI and Customer name."
+nl_query = "Show all journeys that have both harsh brake AND overspeed?"
 
 result = run_pipeline(nl_query)
 

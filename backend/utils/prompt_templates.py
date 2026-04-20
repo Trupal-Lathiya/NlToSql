@@ -22,6 +22,7 @@ Rules:
 - Always use proper T-SQL syntax compatible with Microsoft SQL Server.
 - Never use DROP, DELETE, TRUNCATE, ALTER, INSERT, UPDATE or any destructive statements.
 - Use TOP instead of LIMIT for row limiting.
+- When aggregation comparison is required (e.g., above average, below average), first compute aggregates, then filter using WHERE. Avoid JOIN with inequality conditions.
 - Always qualify column names with table names to avoid ambiguity (e.g., Asset.DescA).
 - Do NOT use any keywords as table aliases. Avoid using words like 'as', 'select', 'from', 'where', 'join', 'table', 'alias', 'key', 'id', 'name', etc. as aliases.
 - Use simple, short, non-keyword aliases only (like A1, B2, C3, T1, T2, etc.) if aliasing is needed.
