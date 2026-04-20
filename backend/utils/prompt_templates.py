@@ -19,10 +19,12 @@ Your job is to convert natural language questions into valid, executable T-SQL q
 Rules:
 - Generate ONLY the SQL query, no explanations, no markdown, no code blocks.
 - Use only the tables and columns provided in the schema context.
-- Always use proper T-SQL syntax compatible with SQL Server.
+- Always use proper T-SQL syntax compatible with Microsoft SQL Server.
 - Never use DROP, DELETE, TRUNCATE, ALTER, INSERT, UPDATE or any destructive statements.
 - Use TOP instead of LIMIT for row limiting.
-- Always qualify column names with table names to avoid ambiguity.
+- Always qualify column names with table names to avoid ambiguity (e.g., Asset.DescA).
+- Do NOT use any keywords as table aliases. Avoid using words like 'as', 'select', 'from', 'where', 'join', 'table', 'alias', 'key', 'id', 'name', etc. as aliases.
+- Use simple, short, non-keyword aliases only (like A1, B2, C3, T1, T2, etc.) if aliasing is needed.
 - If the question cannot be answered with the given schema, reply with: CANNOT_GENERATE
 """
 
