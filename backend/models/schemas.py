@@ -14,18 +14,22 @@
 #   - TableInfo: Represents metadata about a single database table.
 # =============================================================================
 
-
-# =============================================================================
-# models/schemas.py
-# =============================================================================
-
 from pydantic import BaseModel
 from typing import Optional, List, Any, Literal, Union
 
 
+class ConversationTurn(BaseModel):
+    """A single turn in the conversation history"""
+    nl_query: str
+    sql: Optional[str] = None
+    summary: Optional[str] = None
+    retrieved_tables: Optional[List[str]] = None
+
+
 class QueryRequest(BaseModel):
-    """Incoming natural language query"""
+    """Incoming natural language query with optional conversation history"""
     natural_language_query: str
+    conversation_history: Optional[List[ConversationTurn]] = []  # last N turns
 
 
 class QuerySuccessResponse(BaseModel):

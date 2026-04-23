@@ -13,3 +13,7 @@
 .env
 .env.example
 
+node_modules/
+backend/__pycache__/
+.venv/
+*.pyc

@@ -51,7 +51,7 @@ def execute_query(sql: str) -> dict:
         conn.close()
         return {"status": "success", "columns": columns, "rows": rows}
     except Exception as e:
-        logger.error(f"Query execution failed: {e}")
+        logger.error(f"Query execution failed: {e} + {sql}")
         return {"status": "error", "message": str(e)}
 
 

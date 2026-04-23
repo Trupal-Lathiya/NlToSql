@@ -10,10 +10,6 @@
 #     and their results for display in the frontend.
 # =============================================================================
 
-# =============================================================================
-# routes/query_routes.py
-# =============================================================================
-
 from fastapi import APIRouter
 from models.schemas import QueryRequest, QueryResponse
 from services.query_pipeline import run_pipeline
@@ -24,7 +20,11 @@ router = APIRouter(prefix="/query", tags=["Query"])
 @router.post("", response_model=QueryResponse)
 def handle_query(request: QueryRequest):
     """
-    Accepts natural language query and returns SQL + results or error.
+    Accepts natural language query + optional conversation history,
+    returns SQL + results or error.
     """
-    result = run_pipeline(request.natural_language_query)
+    result = run_pipeline(
+        nl_query=request.natural_language_query,
+        conversation_history=[turn.dict() for turn in (request.conversation_history or [])]
+    )
     return result
