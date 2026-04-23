@@ -16,6 +16,8 @@ import logging
 import csv
 import os
 import re
+# ✅ FIX 1: Import ThreadPoolExecutor to run classify + embed in parallel
+from concurrent.futures import ThreadPoolExecutor
 from services.embedding_service import embed_text
 from services.pinecone_service import search_similar
 from services.llm_service import generate_sql, generate_summary
@@ -35,12 +37,17 @@ BLOCKED_SQL_KEYWORDS = [
     r'\bEXECUTE\b', r'\bCREATE\b', r'\bREPLACE\b',
 ]
 
+# ✅ FIX 2: Module-level Groq client — created once, reused forever.
+#    Previously this was created inside classify_query() on every single call.
+_classifier_client = Groq(api_key=GROQ_API_KEY)
+
 
 def classify_query(nl_query: str) -> str:
     try:
-        client = Groq(api_key=GROQ_API_KEY)
+        # ✅ FIX 2 applied here: use the module-level _classifier_client
+        #    instead of Groq(api_key=GROQ_API_KEY) inside the function body.
         prompt = RELEVANCE_CHECK_PROMPT.format(nl_query=nl_query)
-        response = client.chat.completions.create(
+        response = _classifier_client.chat.completions.create(
             model=GROQ_CLASSIFIER_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.0,
@@ -112,6 +119,11 @@ def fetch_schemas_by_ids(table_ids: list[str], already_fetched_ids: list[str]) -
     Directly fetches schema records from Pinecone by table ID for tables
     that were referenced via FK relationships but not returned by similarity
     search. Guarantees the LLM always has the full JOIN context.
+
+    ✅ FIX 3: Previously looped over each ID with a separate index.fetch()
+    call per table — N tables = N network round-trips. Pinecone's fetch()
+    accepts a list of IDs, so we now pass all missing IDs in one call.
+    N network round-trips → 1.
     """
     from services.pinecone_service import get_index
 
@@ -122,10 +134,12 @@ def fetch_schemas_by_ids(table_ids: list[str], already_fetched_ids: list[str]) -
     index = get_index()
     extra = []
 
-    for table_id in missing:
-        try:
-            result = index.fetch(ids=[table_id])
-            vectors = result.get("vectors", {})
+    # ✅ Single batch fetch — one network call for all missing table IDs
+    try:
+        result = index.fetch(ids=missing)
+        vectors = result.get("vectors", {})
+
+        for table_id in missing:
             if table_id in vectors:
                 metadata = vectors[table_id].get("metadata", {})
                 extra.append({
@@ -136,10 +150,12 @@ def fetch_schemas_by_ids(table_ids: list[str], already_fetched_ids: list[str]) -
                 logger.info(f"Auto-fetched FK-related table schema: {table_id}")
             else:
                 logger.warning(f"FK-related table '{table_id}' not found in Pinecone.")
-        except Exception as e:
-            logger.error(f"Failed to fetch schema for '{table_id}': {e}")
+
+    except Exception as e:
+        logger.error(f"Batch fetch failed for FK-related tables {missing}: {e}")
 
     return extra
+
 
 
 def build_schema_context(matches: list[dict]) -> str:
@@ -164,10 +180,27 @@ def save_csv(columns: list, rows: list, filename: str) -> str:
 
 def run_pipeline(nl_query: str, top_k: int = 10, conversation_history: list = None) -> dict:
     try:
-        # ── Step 0: LLM Classifier — FIRST gate, runs before everything ─
-        logger.info(f"Classifying query: {nl_query}")
-        classification = classify_query(nl_query)
+        # ── Steps 0 & 1 (PARALLEL): Classify query + Embed query at the same time
+        #
+        # ✅ FIX 1 applied here:
+        #    Previously: classify_query() ran, finished (~1-2s), THEN embed_text()
+        #    started (~1-2s). Total: ~2-4s wasted waiting sequentially.
+        #
+        #    Now: both submit to a thread pool and run simultaneously.
+        #    Total wait = max(classify_time, embed_time) instead of their sum.
+        #    Saves ~1-2 seconds on every single query.
+        #
+        logger.info(f"Running classifier and embedding in parallel for: {nl_query}")
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            future_classify = executor.submit(classify_query, nl_query)
+            future_embed    = executor.submit(embed_text, nl_query)
 
+            # .result() blocks until each future is done, but since both
+            # started at the same time, we only wait as long as the slower one.
+            classification  = future_classify.result()
+            query_embedding = future_embed.result()
+
+        # ── Gate: Check classification result ──────────────────────────
         if classification == "BLOCKED_DESTRUCTIVE":
             logger.warning(f"Blocked destructive query: {nl_query}")
             return {
@@ -182,11 +215,8 @@ def run_pipeline(nl_query: str, top_k: int = 10, conversation_history: list = No
                 "message": "🗄️ Please ask a question related to your database — for example: 'Show me all drivers' or 'How many orders were placed this week?'"
             }
 
-        # ── Step 1: Embed the NL query ──────────────────────────────────
-        logger.info(f"Embedding query: {nl_query}")
-        query_embedding = embed_text(nl_query)
-
         # ── Step 2: Search Pinecone for relevant schemas ────────────────
+        # query_embedding is already ready from the parallel step above.
         logger.info("Searching Pinecone for relevant tables...")
         matches = search_similar(query_embedding, top_k=top_k)
         if not matches:
@@ -195,7 +225,7 @@ def run_pipeline(nl_query: str, top_k: int = 10, conversation_history: list = No
                 "message": "⚠️ No relevant tables found for your query. Please try rephrasing your question."
             }
 
-        # ── NEW: Filter out low-confidence matches ──────────────────────
+        # ── Filter out low-confidence matches ───────────────────────────
         SIMILARITY_THRESHOLD = 0.45
         strong_matches = [m for m in matches if m["score"] >= SIMILARITY_THRESHOLD]
         if not strong_matches:

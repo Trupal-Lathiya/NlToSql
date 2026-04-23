@@ -14,7 +14,7 @@
 
 import logging
 from groq import Groq
-from config import GROQ_API_KEY, GROQ_MODEL
+from config import GROQ_API_KEY, GROQ_MODEL, GROQ_CLASSIFIER_MODEL
 from utils.prompt_templates import SYSTEM_PROMPT, SQL_GENERATION_PROMPT, RESPONSE_SUMMARY_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -91,12 +91,18 @@ def generate_summary(nl_query: str, sql: str, columns: list, rows: list) -> dict
         )
 
         response = get_client().chat.completions.create(
-            model=GROQ_MODEL,
+            # ✅ FIX 4a: Use the fast 8B classifier model instead of the
+            #    120B SQL model. Summaries are plain English — the small
+            #    model handles this perfectly and responds much faster.
+            model=GROQ_CLASSIFIER_MODEL,
             messages=[
                 {"role": "user", "content": prompt}
             ],
             temperature=0.3,
-            max_tokens=1024
+            # ✅ FIX 4b: Reduced from 1024 → 300. A summary is 2-4 sentences.
+            #    Asking for 1024 tokens was making the model generate padding
+            #    and unnecessary elaboration, costing extra time for no value.
+            max_tokens=300
         )
 
         summary = response.choices[0].message.content.strip()
