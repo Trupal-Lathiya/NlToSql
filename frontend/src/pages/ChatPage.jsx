@@ -1,19 +1,14 @@
-// =============================================================================
-// pages/ChatPage.jsx - Main NL2SQL Chat Interface
-// Replaces the main frontend/app.py Streamlit chat UI
-// =============================================================================
-
 import { useState, useEffect, useRef } from "react";
 import { sendQuery } from "../services/apiClient";
 import SqlDisplay from "../components/SqlDisplay";
 import ResultsTable from "../components/ResultsTable";
-import styles from "./ChatPage.module.css";
 
 export default function ChatPage({ history, addEntry }) {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const bottomRef = useRef(null);
 
+  // Auto-scroll to bottom whenever history or loading changes
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [history, loading]);
@@ -23,121 +18,83 @@ export default function ChatPage({ history, addEntry }) {
     if (!query || loading) return;
     setInput("");
     setLoading(true);
-
-    const now = new Date();
-    const timestamp = now.toTimeString().slice(0, 8);
-
+    const timestamp = new Date().toTimeString().slice(0, 8);
     const result = await sendQuery(query);
-    addEntry({ ...result, nl_query: query, timestamp });
+    addEntry({ ...result, nl_query: query, timestamp }); // appends to END
     setLoading(false);
   };
 
   const handleKeyDown = (e) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      handleSend();
-    }
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); }
   };
 
   return (
-    <div className={styles.page}>
-      <div className={styles.messages}>
+    <div className="chat-page">
+      <div className="chat-messages">
+
+        {/* Welcome screen — only when no messages yet */}
         {history.length === 0 && !loading && (
-          <div className={styles.welcome}>
-            <div className={styles.welcomeIcon}>🗄️</div>
+          <div className="chat-welcome">
+            <div className="chat-welcome-icon">🗄️</div>
             <h2>NL2SQL Chat</h2>
-            <p>
-              Ask any question about your database in plain English.
-              <br />
-              I'll generate SQL and return the results instantly.
-            </p>
-            <div className={styles.exampleChips}>
-              {[
-                "Show me all customers",
-                "How many orders this week?",
-                "List top 10 assets",
-                "Count journeys with harsh braking",
-              ].map((ex) => (
-                <button
-                  key={ex}
-                  className={styles.chip}
-                  onClick={() => setInput(ex)}
-                >
-                  {ex}
-                </button>
+            <p>Ask any question about your database in plain English.<br />I'll generate SQL and return the results instantly.</p>
+            <div className="example-chips">
+              {["Show me all customers", "How many orders this week?", "List top 10 assets", "Count journeys with harsh braking"].map((ex) => (
+                <button key={ex} className="example-chip" onClick={() => setInput(ex)}>{ex}</button>
               ))}
             </div>
           </div>
         )}
 
+        {/* Messages — oldest at top, newest at bottom */}
         {history.map((entry) => (
-          <div key={entry.id} className={styles.messageGroup}>
-            {/* User bubble */}
-            <div className={styles.userRow}>
-              <div className={styles.userBubble}>
+          <div key={entry.id} className="message-group">
+            <div className="user-row">
+              <div className="user-bubble">
                 {entry.nl_query}
-                <div className={styles.bubbleTime}>{entry.timestamp}</div>
+                <div className="bubble-time">{entry.timestamp}</div>
               </div>
-              <span className={styles.avatar}>👤</span>
+              <span className="msg-avatar">👤</span>
             </div>
-
-            {/* Assistant bubble */}
-            <div className={styles.assistantRow}>
-              <span className={styles.avatar}>🗄️</span>
-              <div className={styles.assistantBubble}>
+            <div className="assistant-row">
+              <span className="msg-avatar">🗄️</span>
+              <div className="assistant-bubble">
                 {entry.status === "error" ? (
-                  <div className={styles.errorMsg}>❌ {entry.message}</div>
+                  <div className="msg-error">❌ {entry.message}</div>
                 ) : (
                   <>
-                    <div className={styles.summary}>
-                      {entry.summary || "Query executed successfully."}
-                    </div>
-
-                    <div className={styles.expandSection}>
-                      <SqlDisplay
-                        sql={entry.sql}
-                        retrievedTables={entry.retrieved_tables}
-                      />
-                    </div>
-
+                    <div className="msg-summary">{entry.summary || "Query executed successfully."}</div>
+                    <SqlDisplay sql={entry.sql} retrievedTables={entry.retrieved_tables} />
                     {entry.columns && entry.rows != null && (
-                      <ResultsTable
-                        columns={entry.columns}
-                        rows={entry.rows}
-                        totalRowCount={entry.total_row_count}
-                      />
+                      <ResultsTable columns={entry.columns} rows={entry.rows} totalRowCount={entry.total_row_count} />
                     )}
                   </>
                 )}
               </div>
             </div>
-
-            <div className={styles.divider} />
+            <div className="msg-divider" />
           </div>
         ))}
 
+        {/* Loading bubble always at bottom */}
         {loading && (
-          <div className={styles.assistantRow}>
-            <span className={styles.avatar}>🗄️</span>
-            <div className={`${styles.assistantBubble} ${styles.thinking}`}>
-              <div className={styles.dots}>
-                <span /><span /><span />
-              </div>
-              <span className={styles.thinkingText}>
-                Embedding → Searching → Generating SQL → Executing…
-              </span>
+          <div className="assistant-row">
+            <span className="msg-avatar">🗄️</span>
+            <div className="assistant-bubble thinking">
+              <div className="dots"><span /><span /><span /></div>
+              <span className="thinking-text">Embedding → Searching → Generating SQL → Executing…</span>
             </div>
           </div>
         )}
 
+        {/* Invisible anchor — scroll target */}
         <div ref={bottomRef} />
       </div>
 
-      {/* Fixed input bar */}
-      <div className={styles.inputBar}>
-        <div className={styles.inputWrapper}>
+      <div className="chat-input-bar">
+        <div className="input-wrapper">
           <textarea
-            className={styles.textarea}
+            className="chat-textarea"
             placeholder="Ask your database anything..."
             value={input}
             onChange={(e) => setInput(e.target.value)}
@@ -145,15 +102,9 @@ export default function ChatPage({ history, addEntry }) {
             rows={1}
             disabled={loading}
           />
-          <button
-            className={styles.sendBtn}
-            onClick={handleSend}
-            disabled={!input.trim() || loading}
-          >
-            ➤
-          </button>
+          <button className="send-btn" onClick={handleSend} disabled={!input.trim() || loading}>➤</button>
         </div>
-        <div className={styles.hint}>Press Enter to send · Shift+Enter for newline</div>
+        <div className="input-hint">Press Enter to send · Shift+Enter for newline</div>
       </div>
     </div>
   );

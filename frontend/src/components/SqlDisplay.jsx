@@ -1,10 +1,4 @@
-// =============================================================================
-// components/SqlDisplay.jsx - SQL Query Display Component
-// Replaces frontend/components/sql_display.py
-// =============================================================================
-
 import { useState } from "react";
-import styles from "./SqlDisplay.module.css";
 
 export default function SqlDisplay({ sql, retrievedTables }) {
   const [copied, setCopied] = useState(false);
@@ -18,33 +12,20 @@ export default function SqlDisplay({ sql, retrievedTables }) {
   };
 
   return (
-    <div className={styles.container}>
-      <div className={styles.header}>
-        <span className={styles.label}>
-          <span className={styles.icon}>🧾</span> Generated SQL
-        </span>
-        <button className={styles.copyBtn} onClick={handleCopy}>
+    <div className="sql-container">
+      <div className="sql-header">
+        <span className="sql-label">🧾 Generated SQL</span>
+        <button className="copy-btn" onClick={handleCopy}>
           {copied ? "✅ Copied!" : "📋 Copy"}
         </button>
       </div>
-      <pre className={styles.codeBlock}>
-        <code>{sql}</code>
-      </pre>
-
-      <button
-        className={styles.tablesToggle}
-        onClick={() => setTablesOpen((o) => !o)}
-      >
+      <pre className="sql-code"><code>{sql}</code></pre>
+      <button className="tables-toggle" onClick={() => setTablesOpen((o) => !o)}>
         {tablesOpen ? "▲" : "▼"} Tables used from Pinecone ({retrievedTables?.length || 0})
       </button>
-
       {tablesOpen && (
-        <div className={styles.tablesList}>
-          {retrievedTables?.map((t) => (
-            <span key={t} className={styles.tableTag}>
-              {t}
-            </span>
-          ))}
+        <div className="tables-list">
+          {retrievedTables?.map((t) => <span key={t} className="table-tag">{t}</span>)}
         </div>
       )}
     </div>
