@@ -232,14 +232,54 @@ def run_pipeline(nl_query: str, top_k: int = 10, conversation_history: list = No
         # ── Filter out low-confidence matches ───────────────────────────
         SIMILARITY_THRESHOLD = 0.45
         strong_matches = [m for m in matches if m["score"] >= SIMILARITY_THRESHOLD]
+
         if not strong_matches:
-            best_score = matches[0]["score"]
-            logger.warning(f"All matches below threshold. Best score: {best_score:.3f}")
-            return {
-                "status": "error",
-                "message": "🗄️ I couldn't find any relevant tables for your question. Your database may not contain data related to this topic. Please ask about data that exists in your database."
-            }
-        matches = strong_matches
+            # ── History-based fallback ───────────────────────────────────
+            # When a query scores below the threshold, it means it doesn't
+            # directly mention any table keywords (e.g. "which has highest
+            # journey" after asking about drivers). In this case, if there
+            # is conversation history with previously retrieved tables,
+            # we reuse those tables — regardless of whether the LLM
+            # classified the query as FOLLOW_UP or FRESH.
+            #
+            # Why ignore is_followup here?
+            # The FOLLOWUP_DETECTION_PROMPT looks for pronouns ("them",
+            # "those") or phrases like "also show". A query like "which has
+            # highest journey" has none of those markers, so it gets tagged
+            # FRESH even though it clearly continues the previous topic.
+            # The low similarity score itself is the signal we need — if
+            # the query scored low AND history exists, try history tables
+            # before giving up entirely.
+            previous_tables = None
+            if conversation_history:
+                for turn in reversed(conversation_history):
+                    if turn.get("retrieved_tables"):
+                        previous_tables = turn["retrieved_tables"]
+                        break
+
+            if previous_tables:
+                logger.info(
+                    f"All matches below threshold (best: {matches[0]['score']:.3f}). "
+                    f"Falling back to previous turn tables: {previous_tables}"
+                )
+                matches = fetch_schemas_by_ids(previous_tables, [])
+                if not matches:
+                    return {
+                        "status": "error",
+                        "message": "⚠️ Could not retrieve previous table schemas. Please rephrase your question."
+                    }
+                # Treat as follow-up since we're reusing previous tables
+                is_followup = True
+            else:
+                # No history to fall back on — genuinely irrelevant query
+                best_score = matches[0]["score"]
+                logger.warning(f"All matches below threshold. Best score: {best_score:.3f}")
+                return {
+                    "status": "error",
+                    "message": "🗄️ I couldn't find any relevant tables for your question. Your database may not contain data related to this topic. Please ask about data that exists in your database."
+                }
+        else:
+            matches = strong_matches
 
         already_fetched_ids = [m["id"] for m in matches]
         logger.info(f"Directly matched tables: {already_fetched_ids}")
