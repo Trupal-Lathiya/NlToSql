@@ -23,5 +23,5 @@ pyodbc
 pydantic
 python-multipart
 transformers==4.44.2 
-FlagEmbedding==1.2.11
+FlagEmbedding==1.2.5
 peft
