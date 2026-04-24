@@ -129,3 +129,26 @@ Classify the user's question into one of three categories:
 User question: "{nl_query}"
 
 Reply with ONLY one of these three words: ALLOWED, BLOCKED_DESTRUCTIVE, BLOCKED_IRRELEVANT"""
+
+
+FOLLOWUP_DETECTION_PROMPT = """You are a query intent classifier.
+
+Given the conversation history and a new question, decide if the new question is a FOLLOW_UP to the previous queries or a FRESH new question.
+
+FOLLOW_UP means:
+- Uses pronouns like "them", "those", "it", "they", "these"
+- Says "also show", "add", "include", "filter those", "sort them"
+- Refers to previous results like "from those", "of them", "same ones"
+- Asks for more detail about previous results
+
+FRESH means:
+- Completely new topic unrelated to history
+- Asks about a different table or entity
+- No reference to previous queries
+
+Conversation History:
+{conversation_history}
+
+New Question: "{nl_query}"
+
+Reply with ONLY one word: FOLLOW_UP or FRESH"""

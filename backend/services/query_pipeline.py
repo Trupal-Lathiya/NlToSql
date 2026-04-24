@@ -20,7 +20,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from services.embedding_service import embed_text
 from services.pinecone_service import search_similar
-from services.llm_service import generate_sql, generate_summary
+from services.llm_service import generate_sql, generate_summary, detect_followup
 from services.database_service import execute_query
 from utils.prompt_templates import RELEVANCE_CHECK_PROMPT
 from groq import Groq
@@ -215,7 +215,11 @@ def run_pipeline(nl_query: str, top_k: int = 10, conversation_history: list = No
                 "message": "🗄️ Please ask a question related to your database — for example: 'Show me all drivers' or 'How many orders were placed this week?'"
             }
 
-        # ── Step 2: Search Pinecone for relevant schemas ────────────────
+        # ── Step 2: Detect if query is follow-up using conversation history ─
+        is_followup = detect_followup(nl_query, conversation_history or [])
+        logger.info(f"Follow-up detection for '{nl_query}': {is_followup}")
+
+        # ── Step 3: Search Pinecone for relevant schemas ────────────────
         # query_embedding is already ready from the parallel step above.
         logger.info("Searching Pinecone for relevant tables...")
         matches = search_similar(query_embedding, top_k=top_k)
@@ -240,7 +244,7 @@ def run_pipeline(nl_query: str, top_k: int = 10, conversation_history: list = No
         already_fetched_ids = [m["id"] for m in matches]
         logger.info(f"Directly matched tables: {already_fetched_ids}")
 
-        # ── Step 3: Auto-fetch FK-related tables missing from results ───
+        # ── Step 4: Auto-fetch FK-related tables missing from results ───
         related_ids = extract_related_table_ids(matches)
         logger.info(f"FK-related tables detected: {related_ids}")
 
@@ -250,12 +254,18 @@ def run_pipeline(nl_query: str, top_k: int = 10, conversation_history: list = No
         retrieved_tables = [m["id"] for m in all_matches]
         logger.info(f"Final tables sent to LLM: {retrieved_tables}")
 
-        # ── Step 4: Build schema context for LLM ───────────────────────
+        # ── Step 5: Build schema context for LLM ───────────────────────
         schema_context = build_schema_context(all_matches)
 
-        # ── Step 5: Generate SQL using Groq LLM ────────────────────────
+        # ── Step 6: Generate SQL using Groq LLM ────────────────────────
+        # If follow-up → send conversation history as context
+        # If fresh     → send no history (clean slate)
         logger.info("Generating SQL with Groq...")
-        llm_result = generate_sql(nl_query, schema_context)
+        llm_result = generate_sql(
+            nl_query,
+            schema_context,
+            conversation_history=conversation_history if is_followup else None
+        )
         if llm_result["status"] != "success":
             return {
                 "status": "error",
@@ -264,7 +274,7 @@ def run_pipeline(nl_query: str, top_k: int = 10, conversation_history: list = No
 
         sql = llm_result["sql"]
 
-        # ── Step 6: Hard block destructive SQL even if LLM slips ───────
+        # ── Step 7: Hard block destructive SQL even if LLM slips ───────
         if is_destructive_sql(sql):
             logger.warning(f"LLM generated destructive SQL despite classification: {sql}")
             return {
@@ -272,7 +282,7 @@ def run_pipeline(nl_query: str, top_k: int = 10, conversation_history: list = No
                 "message": "🚫 This assistant is read-only. Queries that delete, update, insert, or modify data are not allowed."
             }
 
-        # ── Step 7: Execute SQL on SQL Server ──────────────────────────
+        # ── Step 8: Execute SQL on SQL Server ──────────────────────────
         logger.info(f"Executing SQL: {sql}")
         db_result = execute_query(sql)
         if db_result["status"] != "success":
@@ -299,7 +309,7 @@ def run_pipeline(nl_query: str, top_k: int = 10, conversation_history: list = No
         display_rows = all_rows[:10]
         total_rows = len(all_rows)
 
-        # ── Step 8: Generate human-friendly summary ─────────────────────
+        # ── Step 9: Generate human-friendly summary ─────────────────────
         logger.info("Generating summary...")
         summary_result = generate_summary(nl_query, sql, columns, display_rows)
         summary = (
@@ -308,7 +318,7 @@ def run_pipeline(nl_query: str, top_k: int = 10, conversation_history: list = No
             else "Query executed successfully."
         )
 
-        # ── Step 9: Save CSV if rows > 10 ──────────────────────────────
+        # ── Step 10: Save CSV if rows > 10 ──────────────────────────────
         csv_path = None
         if total_rows > 10:
             safe_name = "".join(c if c.isalnum() else "_" for c in nl_query[:30])
@@ -324,6 +334,7 @@ def run_pipeline(nl_query: str, top_k: int = 10, conversation_history: list = No
             "all_rows": all_rows,
             "total_row_count": total_rows,
             "summary": summary,
+            "is_followup": is_followup,      # ← new: tells frontend if follow-up
             "csv_path": csv_path
         }
 

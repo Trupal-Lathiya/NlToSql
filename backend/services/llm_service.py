@@ -1,24 +1,17 @@
-# =============================================================================
-# services/llm_service.py - Groq LLM Service for SQL Generation
-# =============================================================================
-# This file handles communication with the Groq LLM API to generate SQL:
-#   - Constructs a prompt combining the user's natural language query with
-#     the relevant table schemas retrieved from Pinecone.
-#   - Sends the prompt to the Groq API (e.g., using llama3-70b model).
-#   - Parses the LLM response to extract the clean SQL query.
-#   - Includes prompt engineering logic to ensure the LLM generates
-#     valid T-SQL syntax compatible with SQL Server.
-#   - Handles error cases like malformed responses or API failures.
-# =============================================================================
-
-
 import logging
 from groq import Groq
 from config import GROQ_API_KEY, GROQ_MODEL, GROQ_CLASSIFIER_MODEL
-from utils.prompt_templates import SYSTEM_PROMPT, SQL_GENERATION_PROMPT, RESPONSE_SUMMARY_PROMPT
+from utils.prompt_templates import (
+    SYSTEM_PROMPT,
+    SQL_GENERATION_PROMPT,
+    SQL_GENERATION_WITH_MEMORY_PROMPT,
+    FOLLOWUP_DETECTION_PROMPT,
+    RESPONSE_SUMMARY_PROMPT,
+)
 
 logger = logging.getLogger(__name__)
 _client = None
+
 
 def get_client():
     global _client
@@ -26,12 +19,54 @@ def get_client():
         _client = Groq(api_key=GROQ_API_KEY)
     return _client
 
-def generate_sql(nl_query: str, schema_context: str) -> dict:
+
+def detect_followup(nl_query: str, conversation_history: list) -> bool:
+    """Returns True if the new query is a follow-up to previous queries."""
+    if not conversation_history:
+        return False
     try:
-        prompt = SQL_GENERATION_PROMPT.format(
-            schema_context=schema_context,
+        history_text = "\n".join(
+            [f"Q{i+1}: {t.get('nl_query', '')}" for i, t in enumerate(conversation_history)]
+        )
+        prompt = FOLLOWUP_DETECTION_PROMPT.format(
+            conversation_history=history_text,
             nl_query=nl_query
         )
+        response = get_client().chat.completions.create(
+            model=GROQ_CLASSIFIER_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.0,
+            max_tokens=10
+        )
+        answer = response.choices[0].message.content.strip().upper()
+        logger.info(f"Follow-up detection for '{nl_query}': {answer}")
+        return answer.startswith("FOLLOW")
+    except Exception as e:
+        logger.error(f"Follow-up detection failed: {e}")
+        return False
+
+
+def generate_sql(nl_query: str, schema_context: str, conversation_history: list = None) -> dict:
+    try:
+        if conversation_history and len(conversation_history) > 0:
+            history_text = ""
+            for i, turn in enumerate(conversation_history, 1):
+                history_text += f"Q{i}: {turn.get('nl_query', '')}\n"
+                if turn.get('sql'):
+                    history_text += f"SQL{i}: {turn.get('sql', '')}\n"
+                history_text += "\n"
+
+            prompt = SQL_GENERATION_WITH_MEMORY_PROMPT.format(
+                schema_context=schema_context,
+                history_count=len(conversation_history),
+                conversation_history=history_text.strip(),
+                nl_query=nl_query
+            )
+        else:
+            prompt = SQL_GENERATION_PROMPT.format(
+                schema_context=schema_context,
+                nl_query=nl_query
+            )
 
         response = get_client().chat.completions.create(
             model=GROQ_MODEL,
@@ -45,7 +80,6 @@ def generate_sql(nl_query: str, schema_context: str) -> dict:
 
         sql = response.choices[0].message.content.strip()
 
-        # Clean up if model wraps in markdown
         if sql.startswith("```"):
             sql = sql.split("```")[1]
             if sql.lower().startswith("sql"):
@@ -53,7 +87,7 @@ def generate_sql(nl_query: str, schema_context: str) -> dict:
             sql = sql.strip()
 
         if sql == "CANNOT_GENERATE":
-            return {"status": "error", "message": f"Could not generate SQL for this query. {sql}"}
+            return {"status": "error", "message": "Could not generate SQL for this query."}
 
         logger.info(f"Generated SQL: {sql}")
         return {"status": "success", "sql": sql}
@@ -69,15 +103,13 @@ def generate_summary(nl_query: str, sql: str, columns: list, rows: list) -> dict
         preview_rows = rows[:10]
         preview_count = len(preview_rows)
 
-        # Format rows as readable table text
         rows_text = "\n".join(
             [str(dict(zip(columns, row))) for row in preview_rows]
         )
 
         csv_note = (
-            f"Note: Only the first 10 rows are shown here. The full {total_count} rows are available in the CSV download."
-            if total_count > 10
-            else ""
+            f"Note: Only the first 10 rows are shown. Full {total_count} rows available in CSV."
+            if total_count > 10 else ""
         )
 
         prompt = RESPONSE_SUMMARY_PROMPT.format(
@@ -91,22 +123,13 @@ def generate_summary(nl_query: str, sql: str, columns: list, rows: list) -> dict
         )
 
         response = get_client().chat.completions.create(
-            # ✅ FIX 4a: Use the fast 8B classifier model instead of the
-            #    120B SQL model. Summaries are plain English — the small
-            #    model handles this perfectly and responds much faster.
             model=GROQ_CLASSIFIER_MODEL,
-            messages=[
-                {"role": "user", "content": prompt}
-            ],
+            messages=[{"role": "user", "content": prompt}],
             temperature=0.3,
-            # ✅ FIX 4b: Reduced from 1024 → 300. A summary is 2-4 sentences.
-            #    Asking for 1024 tokens was making the model generate padding
-            #    and unnecessary elaboration, costing extra time for no value.
             max_tokens=300
         )
 
         summary = response.choices[0].message.content.strip()
-        logger.info("Summary generated successfully.")
         return {"status": "success", "summary": summary}
 
     except Exception as e:

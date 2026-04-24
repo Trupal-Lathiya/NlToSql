@@ -42,6 +42,7 @@ class QuerySuccessResponse(BaseModel):
     rows: List[List[Any]]
     total_row_count: int
     summary: str
+    is_followup: bool = False
     csv_path: Optional[str] = None
 
 
