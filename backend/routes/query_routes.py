@@ -1,20 +1,39 @@
-# =============================================================================
-# routes/query_routes.py - NL-to-SQL Query API Endpoints
-# =============================================================================
-# This file defines the main API endpoints for the NL-to-SQL workflow:
-#   - POST /query : Accepts a natural language query from the user,
-#     orchestrates the full pipeline (embedding → Pinecone search →
-#     Groq SQL generation → SQL Server execution), and returns the
-#     generated SQL query along with the query results to the frontend.
-#   - GET /query/history : (Optional) Returns the history of past queries
-#     and their results for display in the frontend.
-# =============================================================================
-
 from fastapi import APIRouter
 from models.schemas import QueryRequest, QueryResponse
 from services.query_pipeline import run_pipeline
+from services.llm_service import generate_followup_questions
+from pydantic import BaseModel
+from typing import List, Optional
 
 router = APIRouter(prefix="/query", tags=["Query"])
+
+
+class FollowupRequest(BaseModel):
+    nl_query: str
+    retrieved_tables: List[str]
+    summary: str
+    columns: List[str]
+
+
+class FollowupResponse(BaseModel):
+    questions: List[str]
+
+
+# ── IMPORTANT: specific sub-routes must be defined BEFORE the catch-all "" ──
+
+@router.post("/followup-questions", response_model=FollowupResponse)
+def get_followup_questions(request: FollowupRequest):
+    """
+    Given the previous query context (tables, summary, columns),
+    returns 3 suggested follow-up questions the user might want to ask.
+    """
+    questions = generate_followup_questions(
+        nl_query=request.nl_query,
+        retrieved_tables=request.retrieved_tables,
+        summary=request.summary,
+        columns=request.columns,
+    )
+    return {"questions": questions}
 
 
 @router.post("", response_model=QueryResponse)

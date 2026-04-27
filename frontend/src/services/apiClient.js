@@ -39,6 +39,26 @@ export async function sendQuery(naturalLanguageQuery, memoryWindow = []) {
   }
 }
 
+export async function getFollowupQuestions({ nl_query, retrieved_tables, summary, columns }) {
+  try {
+    const response = await fetch(`${BASE_URL}/query/followup-questions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+      },
+      body: JSON.stringify({ nl_query, retrieved_tables, summary, columns }),
+      signal: AbortSignal.timeout(30000),
+    });
+
+    if (!response.ok) return { questions: [] };
+    const data = await response.json();
+    return data;
+  } catch {
+    return { questions: [] };
+  }
+}
+
 export async function checkHealth() {
   try {
     const res = await fetch(`${BASE_URL}/health`, {

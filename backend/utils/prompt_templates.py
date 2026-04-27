@@ -12,6 +12,26 @@
 #     the quality of generated queries via in-context learning.
 # =============================================================================
 
+FOLLOWUP_QUESTIONS_PROMPT = """You are a smart database assistant. Based on a user's previous database query and its results, generate exactly 3 short, natural follow-up questions the user might want to ask next.
+ 
+Previous Question: {nl_query}
+Tables Used: {retrieved_tables}
+Result Summary: {summary}
+Columns Returned: {columns}
+ 
+Rules:
+- Each question must be directly related to the same tables or data just queried
+- Questions should explore different angles: filtering, aggregation, comparison, sorting, or drilling down
+- Keep each question under 12 words
+- Make them sound natural, like a person would ask
+- Do NOT number them or add bullet points
+- Return ONLY a JSON array of 3 strings, nothing else. No explanation, no markdown.
+ 
+Example output format:
+["Which driver has the most journeys?", "Show journeys longer than 2 hours", "How many journeys had harsh braking?"]
+ 
+Now generate 3 follow-up questions:"""
+
 
 
 SYSTEM_PROMPT = """You are an expert T-SQL developer for Microsoft SQL Server.

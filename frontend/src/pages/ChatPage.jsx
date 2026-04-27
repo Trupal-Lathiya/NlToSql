@@ -1,19 +1,45 @@
 import { useState, useEffect, useRef } from "react";
-import { sendQuery } from "../services/apiClient";
+import { sendQuery, getFollowupQuestions } from "../services/apiClient";
 import SqlDisplay from "../components/SqlDisplay";
 import ResultsTable from "../components/ResultsTable";
 
 export default function ChatPage({ history, addEntry, getMemoryWindow }) {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [followupMap, setFollowupMap] = useState({});
   const bottomRef = useRef(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [history, loading]);
 
-  const handleSend = async () => {
-    const query = input.trim();
+  // After a successful entry is added, fetch follow-up questions for it
+  useEffect(() => {
+    const lastEntry = history[history.length - 1];
+    if (
+      !lastEntry ||
+      lastEntry.status !== "success" ||
+      followupMap[lastEntry.id] !== undefined
+    ) return;
+
+    // Mark as loading so we don't re-fetch
+    setFollowupMap((prev) => ({ ...prev, [lastEntry.id]: "loading" }));
+
+    getFollowupQuestions({
+      nl_query: lastEntry.nl_query,
+      retrieved_tables: lastEntry.retrieved_tables || [],
+      summary: lastEntry.summary || "",
+      columns: lastEntry.columns || [],
+    }).then((data) => {
+      setFollowupMap((prev) => ({
+        ...prev,
+        [lastEntry.id]: data.questions || [],
+      }));
+    });
+  }, [history]);
+
+  const handleSend = async (queryText) => {
+    const query = (queryText || input).trim();
     if (!query || loading) return;
     setInput("");
     setLoading(true);
@@ -29,6 +55,10 @@ export default function ChatPage({ history, addEntry, getMemoryWindow }) {
 
   const handleKeyDown = (e) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); }
+  };
+
+  const handleFollowupClick = (question) => {
+    handleSend(question);
   };
 
   return (
@@ -56,67 +86,107 @@ export default function ChatPage({ history, addEntry, getMemoryWindow }) {
           </div>
         )}
 
-        {history.map((entry) => (
-          <div key={entry.id} className="message-group">
+        {history.map((entry, idx) => {
+          const isLast = idx === history.length - 1;
+          const followups = followupMap[entry.id];
+          const showFollowups =
+            isLast &&
+            !loading &&
+            entry.status === "success" &&
+            Array.isArray(followups) &&
+            followups.length > 0;
 
-            {/* User bubble with memory indicator */}
-            <div className="user-row">
-              <div className="user-bubble">
-                {entry.nl_query}
-                <div className="bubble-time">
-                  {entry.timestamp}
-                  {entry.memoryCount > 0 && (
-                    <span className="memory-badge">
-                      🧠 {entry.memoryCount} quer{entry.memoryCount === 1 ? "y" : "ies"} in context
-                    </span>
-                  )}
-                  {entry.memoryCount === 0 && (
-                    <span className="memory-badge memory-badge--fresh">
-                      ✨ fresh query
-                    </span>
+          return (
+            <div key={entry.id} className="message-group">
+
+              {/* User bubble with memory indicator */}
+              <div className="user-row">
+                <div className="user-bubble">
+                  {entry.nl_query}
+                  <div className="bubble-time">
+                    {entry.timestamp}
+                    {entry.memoryCount > 0 && (
+                      <span className="memory-badge">
+                        🧠 {entry.memoryCount} quer{entry.memoryCount === 1 ? "y" : "ies"} in context
+                      </span>
+                    )}
+                    {entry.memoryCount === 0 && (
+                      <span className="memory-badge memory-badge--fresh">
+                        ✨ fresh query
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <span className="msg-avatar">👤</span>
+              </div>
+
+              {/* Assistant bubble */}
+              <div className="assistant-row">
+                <span className="msg-avatar">🗄️</span>
+                <div className="assistant-bubble">
+                  {entry.status === "error" ? (
+                    <div className="msg-error">❌ {entry.message}</div>
+                  ) : (
+                    <>
+                      {/* Context used indicator */}
+                      {entry.memoryCount > 0 && entry.is_followup && (
+                        <div className="followup-badge">
+                          🔗 Follow-up — used {entry.memoryCount} previous quer{entry.memoryCount === 1 ? "y" : "ies"} as context
+                        </div>
+                      )}
+                      {entry.memoryCount > 0 && !entry.is_followup && (
+                        <div className="fresh-badge">
+                          🆕 Fresh query — previous context ignored
+                        </div>
+                      )}
+                      <div className="msg-summary">
+                        {entry.summary || "Query executed successfully."}
+                      </div>
+                      <SqlDisplay sql={entry.sql} retrievedTables={entry.retrieved_tables} />
+                      {entry.columns && entry.rows != null && (
+                        <ResultsTable
+                          columns={entry.columns}
+                          rows={entry.rows}
+                          totalRowCount={entry.total_row_count}
+                        />
+                      )}
+
+                      {/* Follow-up questions chips */}
+                      {showFollowups && (
+                        <div className="followup-questions">
+                          <div className="followup-questions-label">💡 Suggested follow-ups</div>
+                          <div className="followup-chips">
+                            {followups.map((q, i) => (
+                              <button
+                                key={i}
+                                className="followup-chip"
+                                onClick={() => handleFollowupClick(q)}
+                                disabled={loading}
+                              >
+                                {q}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Loading state for follow-up questions */}
+                      {isLast && !loading && followups === "loading" && entry.status === "success" && (
+                        <div className="followup-questions-loading">
+                          <span className="followup-dot" /><span className="followup-dot" /><span className="followup-dot" />
+                          <span style={{ fontSize: "0.75rem", color: "var(--color-text-secondary, #64748b)", marginLeft: "6px" }}>
+                            Generating follow-up suggestions...
+                          </span>
+                        </div>
+                      )}
+                    </>
                   )}
                 </div>
               </div>
-              <span className="msg-avatar">👤</span>
+              <div className="msg-divider" />
             </div>
-
-            {/* Assistant bubble */}
-            <div className="assistant-row">
-              <span className="msg-avatar">🗄️</span>
-              <div className="assistant-bubble">
-                {entry.status === "error" ? (
-                  <div className="msg-error">❌ {entry.message}</div>
-                ) : (
-                  <>
-                    {/* Context used indicator */}
-                    {entry.memoryCount > 0 && entry.is_followup && (
-                      <div className="followup-badge">
-                        🔗 Follow-up — used {entry.memoryCount} previous quer{entry.memoryCount === 1 ? "y" : "ies"} as context
-                      </div>
-                    )}
-                    {entry.memoryCount > 0 && !entry.is_followup && (
-                      <div className="fresh-badge">
-                        🆕 Fresh query — previous context ignored
-                      </div>
-                    )}
-                    <div className="msg-summary">
-                      {entry.summary || "Query executed successfully."}
-                    </div>
-                    <SqlDisplay sql={entry.sql} retrievedTables={entry.retrieved_tables} />
-                    {entry.columns && entry.rows != null && (
-                      <ResultsTable
-                        columns={entry.columns}
-                        rows={entry.rows}
-                        totalRowCount={entry.total_row_count}
-                      />
-                    )}
-                  </>
-                )}
-              </div>
-            </div>
-            <div className="msg-divider" />
-          </div>
-        ))}
+          );
+        })}
 
         {loading && (
           <div className="assistant-row">
@@ -146,7 +216,7 @@ export default function ChatPage({ history, addEntry, getMemoryWindow }) {
           />
           <button
             className="send-btn"
-            onClick={handleSend}
+            onClick={() => handleSend()}
             disabled={!input.trim() || loading}
           >
             ➤

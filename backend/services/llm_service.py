@@ -1,3 +1,4 @@
+import json
 import logging
 from groq import Groq
 from config import GROQ_API_KEY, GROQ_MODEL, GROQ_CLASSIFIER_MODEL
@@ -7,6 +8,7 @@ from utils.prompt_templates import (
     SQL_GENERATION_WITH_MEMORY_PROMPT,
     FOLLOWUP_DETECTION_PROMPT,
     RESPONSE_SUMMARY_PROMPT,
+    FOLLOWUP_QUESTIONS_PROMPT,
 )
 
 logger = logging.getLogger(__name__)
@@ -135,3 +137,52 @@ def generate_summary(nl_query: str, sql: str, columns: list, rows: list) -> dict
     except Exception as e:
         logger.error(f"Summary generation failed: {e}")
         return {"status": "error", "message": str(e)}
+
+
+def generate_followup_questions(
+    nl_query: str,
+    retrieved_tables: list,
+    summary: str,
+    columns: list,
+) -> list:
+    """
+    Given context from the previous query, returns 3 follow-up question strings.
+    Falls back to an empty list on any failure.
+    """
+    try:
+        prompt = FOLLOWUP_QUESTIONS_PROMPT.format(
+            nl_query=nl_query,
+            retrieved_tables=", ".join(retrieved_tables),
+            summary=summary,
+            columns=", ".join(columns),
+        )
+
+        response = get_client().chat.completions.create(
+            model=GROQ_CLASSIFIER_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.5,
+            max_tokens=200,
+        )
+
+        raw = response.choices[0].message.content.strip()
+
+        # Strip markdown fences if model wraps it
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.lower().startswith("json"):
+                raw = raw[4:]
+            raw = raw.strip()
+
+        questions = json.loads(raw)
+
+        if isinstance(questions, list):
+            # Sanitise: keep only strings, max 3
+            questions = [q for q in questions if isinstance(q, str)][:3]
+            logger.info(f"Generated follow-up questions: {questions}")
+            return questions
+
+        return []
+
+    except Exception as e:
+        logger.error(f"Follow-up question generation failed: {e}")
+        return []
