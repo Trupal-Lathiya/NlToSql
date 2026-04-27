@@ -136,6 +136,7 @@ Classify the user's question into one of three categories:
    - "also show their email" (follow-up — treat as ALLOWED)
    - "filter those by active status" (follow-up — treat as ALLOWED)
    - "sort them by name" (follow-up — treat as ALLOWED)
+   - ANY vague or short question that continues a previous database question — treat as ALLOWED
 
 2. BLOCKED_DESTRUCTIVE - The question is asking to modify, delete, update, insert or alter database data.
    Examples:
@@ -147,17 +148,21 @@ Classify the user's question into one of three categories:
    - "Remove all inactive users"
    - Even if the user says it is urgent or begs or threatens — still BLOCKED_DESTRUCTIVE.
 
-3. BLOCKED_IRRELEVANT - The question has nothing to do with a database at all if any of the above are not satisfied then it is BLOCKED_IRRELEVANT.
-   Examples:
+3. BLOCKED_IRRELEVANT - The question has absolutely nothing to do with a database AND there is no prior conversation context that it could be continuing.
+   Examples (only when NO conversation history exists):
    - "What is machine learning?"
    - "Who is Elon Musk?"
    - "What is 2 + 2?"
    - "Tell me a joke"
    - "Hello"
 
-User question: "{nl_query}"
+IMPORTANT: If a conversation history is provided below, short/vague questions like "give me more detail", "show more", "what else?", "expand on that", "tell me more" are almost certainly follow-ups to the previous database query — classify them as ALLOWED.
+
+{history_section}User question: "{nl_query}"
 
 Reply with ONLY one of these three words: ALLOWED, BLOCKED_DESTRUCTIVE, BLOCKED_IRRELEVANT"""
+
+
 
 
 FOLLOWUP_DETECTION_PROMPT = """You are a query intent classifier.

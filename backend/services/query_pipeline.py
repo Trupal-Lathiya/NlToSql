@@ -42,11 +42,25 @@ BLOCKED_SQL_KEYWORDS = [
 _classifier_client = Groq(api_key=GROQ_API_KEY)
 
 
-def classify_query(nl_query: str) -> str:
+def classify_query(nl_query: str, conversation_history: list = None) -> str:
     try:
-        # ✅ FIX 2 applied here: use the module-level _classifier_client
-        #    instead of Groq(api_key=GROQ_API_KEY) inside the function body.
-        prompt = RELEVANCE_CHECK_PROMPT.format(nl_query=nl_query)
+        # Build an optional history section to give the classifier context
+        history_section = ""
+        if conversation_history:
+            recent = conversation_history[-3:]  # last 3 turns is enough
+            lines = "\n".join(
+                [f"Q{i+1}: {t.get('nl_query', '')}" for i, t in enumerate(recent)]
+            )
+            history_section = (
+                f"Recent conversation history (for context):\n{lines}\n\n"
+                f"Given this history, the current question may be a follow-up. "
+                f"If it seems to continue the conversation, classify as ALLOWED.\n\n"
+            )
+
+        prompt = RELEVANCE_CHECK_PROMPT.format(
+            nl_query=nl_query,
+            history_section=history_section,
+        )
         response = _classifier_client.chat.completions.create(
             model=GROQ_CLASSIFIER_MODEL,
             messages=[{"role": "user", "content": prompt}],
@@ -58,20 +72,16 @@ def classify_query(nl_query: str) -> str:
         logger.info(f"Query classification for '{nl_query}': {answer}")
         print(f"Query classification for '{nl_query}': {answer}")
 
-        # Use startswith — handles truncated responses like "BLOCK" or "BLOCKED_D"
         if answer.startswith("BLOCKED_D"):
             return "BLOCKED_DESTRUCTIVE"
         elif answer.startswith("BLOCKED_I"):
             return "BLOCKED_IRRELEVANT"
         elif answer.startswith("BLOCK"):
-            # Ambiguous — re-check the query text itself for safety
             destructive_words = ["delete", "drop", "truncate", "alter", "insert", "update", "remove", "merge"]
             if any(w in nl_query.lower() for w in destructive_words):
                 return "BLOCKED_DESTRUCTIVE"
             return "BLOCKED_IRRELEVANT"
         elif answer.startswith("ALLOW") or answer == "":
-            # Empty string or ALLOW* — treat as ALLOWED
-            # Empty can happen when the model is confident it's a DB query and responds minimally
             return "ALLOWED"
         else:
             logger.warning(f"Unrecognized classification response: '{answer}' — defaulting to ALLOWED")
@@ -192,11 +202,9 @@ def run_pipeline(nl_query: str, top_k: int = 10, conversation_history: list = No
         #
         logger.info(f"Running classifier and embedding in parallel for: {nl_query}")
         with ThreadPoolExecutor(max_workers=2) as executor:
-            future_classify = executor.submit(classify_query, nl_query)
+            future_classify = executor.submit(classify_query, nl_query, conversation_history)  # <-- add conversation_history
             future_embed    = executor.submit(embed_text, nl_query)
 
-            # .result() blocks until each future is done, but since both
-            # started at the same time, we only wait as long as the slower one.
             classification  = future_classify.result()
             query_embedding = future_embed.result()
 
