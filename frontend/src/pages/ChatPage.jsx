@@ -147,6 +147,7 @@ export default function ChatPage({ history, addEntry, getMemoryWindow }) {
                         <ResultsTable
                           columns={entry.columns}
                           rows={entry.rows}
+                          allRows={entry.all_rows}      
                           totalRowCount={entry.total_row_count}
                         />
                       )}

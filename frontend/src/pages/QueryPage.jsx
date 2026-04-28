@@ -54,7 +54,12 @@ export default function QueryPage({ addEntry }) {
               </div>
               <SqlDisplay sql={result.sql} retrievedTables={result.retrieved_tables} />
               {result.columns && result.rows != null && (
-                <ResultsTable columns={result.columns} rows={result.rows} totalRowCount={result.total_row_count} />
+                <ResultsTable
+                  columns={result.columns}
+                  rows={result.rows}
+                  allRows={result.all_rows}        
+                  totalRowCount={result.total_row_count}
+                />
               )}
             </>
           )}

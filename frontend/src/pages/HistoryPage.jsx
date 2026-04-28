@@ -50,7 +50,12 @@ export default function HistoryPage({ history, deleteEntry, clearHistory }) {
                         {entry.summary && <p className="result-summary">{entry.summary}</p>}
                         <SqlDisplay sql={entry.sql} retrievedTables={entry.retrieved_tables} />
                         {entry.columns && entry.rows != null && (
-                          <ResultsTable columns={entry.columns} rows={entry.rows} totalRowCount={entry.total_row_count} />
+                          <ResultsTable
+                            columns={entry.columns}
+                            rows={entry.rows}
+                            allRows={entry.all_rows}       
+                            totalRowCount={entry.total_row_count}
+                          />
                         )}
                       </>
                     )}
