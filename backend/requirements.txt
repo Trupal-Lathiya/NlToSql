@@ -25,3 +25,5 @@ python-multipart
 transformers==4.44.2 
 FlagEmbedding==1.2.5
 peft
+numpy
+redis>=5.0.0
