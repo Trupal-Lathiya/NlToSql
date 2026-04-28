@@ -22,9 +22,10 @@ from services.embedding_service import embed_text
 from services.pinecone_service import search_similar
 from services.llm_service import generate_sql, generate_summary, detect_followup
 from services.database_service import execute_query
+from services.redis_cache_service import find_similar_cache, store_in_cache
 from utils.prompt_templates import RELEVANCE_CHECK_PROMPT
 from groq import Groq
-from config import GROQ_API_KEY, GROQ_MODEL, GROQ_CLASSIFIER_MODEL
+from config import GROQ_API_KEY, GROQ_MODEL, GROQ_CLASSIFIER_MODEL, CACHE_ENABLED
 
 logger = logging.getLogger(__name__)
 
@@ -167,7 +168,6 @@ def fetch_schemas_by_ids(table_ids: list[str], already_fetched_ids: list[str]) -
     return extra
 
 
-
 def build_schema_context(matches: list[dict]) -> str:
     context_parts = []
     for match in matches:
@@ -190,6 +190,12 @@ def save_csv(columns: list, rows: list, filename: str) -> str:
 
 def run_pipeline(nl_query: str, top_k: int = 10, conversation_history: list = None) -> dict:
     try:
+        print("\n" + "="*60)
+        print(f"🚀 PIPELINE STARTED")
+        print(f"   Query : {nl_query}")
+        print(f"   Cache : {'ENABLED' if CACHE_ENABLED else 'DISABLED'}")
+        print("="*60)
+
         # ── Steps 0 & 1 (PARALLEL): Classify query + Embed query at the same time
         #
         # ✅ FIX 1 applied here:
@@ -201,6 +207,7 @@ def run_pipeline(nl_query: str, top_k: int = 10, conversation_history: list = No
         #    Saves ~1-2 seconds on every single query.
         #
         logger.info(f"Running classifier and embedding in parallel for: {nl_query}")
+        print(f"\n[STEP 1]   ⚙️  Running classifier + embedding in parallel...")
         with ThreadPoolExecutor(max_workers=2) as executor:
             future_classify = executor.submit(classify_query, nl_query, conversation_history)  # <-- add conversation_history
             future_embed    = executor.submit(embed_text, nl_query)
@@ -208,9 +215,14 @@ def run_pipeline(nl_query: str, top_k: int = 10, conversation_history: list = No
             classification  = future_classify.result()
             query_embedding = future_embed.result()
 
+        print(f"           ✅ Classification  : {classification}")
+        print(f"           ✅ Embedding       : done (dim={len(query_embedding)})")
+
         # ── Gate: Check classification result ──────────────────────────
         if classification == "BLOCKED_DESTRUCTIVE":
             logger.warning(f"Blocked destructive query: {nl_query}")
+            print(f"\n🚫 BLOCKED: Destructive query — pipeline stopped. Cache NOT checked.")
+            print("="*60 + "\n")
             return {
                 "status": "error",
                 "message": "🚫 This assistant is read-only. Queries that delete, update, insert, or modify data are not allowed."
@@ -218,6 +230,8 @@ def run_pipeline(nl_query: str, top_k: int = 10, conversation_history: list = No
 
         if classification == "BLOCKED_IRRELEVANT":
             logger.info(f"Blocked irrelevant query: {nl_query}")
+            print(f"\n🚫 BLOCKED: Irrelevant query — pipeline stopped. Cache NOT checked.")
+            print("="*60 + "\n")
             return {
                 "status": "error",
                 "message": "🗄️ Please ask a question related to your database — for example: 'Show me all drivers' or 'How many orders were placed this week?'"
@@ -226,116 +240,193 @@ def run_pipeline(nl_query: str, top_k: int = 10, conversation_history: list = No
         # ── Step 2: Detect if query is follow-up using conversation history ─
         is_followup = detect_followup(nl_query, conversation_history or [])
         logger.info(f"Follow-up detection for '{nl_query}': {is_followup}")
+        print(f"\n[STEP 2]   🔗 Follow-up detection : {'YES' if is_followup else 'NO'}")
 
-        # ── Step 3: Search Pinecone for relevant schemas ────────────────
-        # query_embedding is already ready from the parallel step above.
-        logger.info("Searching Pinecone for relevant tables...")
-        matches = search_similar(query_embedding, top_k=top_k)
-        if not matches:
-            return {
-                "status": "error",
-                "message": "⚠️ No relevant tables found for your query. Please try rephrasing your question."
-            }
+        # ── Step 3: Redis semantic cache lookup ──────────────────────────────
+        # Cache is SKIPPED entirely for follow-up queries because they depend
+        # on prior conversation context and must go through the full pipeline.
+        cache_hit_entry = None
 
-        # ── Filter out low-confidence matches ───────────────────────────
-        SIMILARITY_THRESHOLD = 0.45
-        strong_matches = [m for m in matches if m["score"] >= SIMILARITY_THRESHOLD]
+        print(f"\n[STEP 3]   🗃️  Redis Cache Check")
+        if not CACHE_ENABLED:
+            print(f"           ⏭️  SKIPPED — cache is DISABLED in config (CACHE_ENABLED=false)")
 
-        if not strong_matches:
-            # ── History-based fallback ───────────────────────────────────
-            # When a query scores below the threshold, it means it doesn't
-            # directly mention any table keywords (e.g. "which has highest
-            # journey" after asking about drivers). In this case, if there
-            # is conversation history with previously retrieved tables,
-            # we reuse those tables — regardless of whether the LLM
-            # classified the query as FOLLOW_UP or FRESH.
-            #
-            # Why ignore is_followup here?
-            # The FOLLOWUP_DETECTION_PROMPT looks for pronouns ("them",
-            # "those") or phrases like "also show". A query like "which has
-            # highest journey" has none of those markers, so it gets tagged
-            # FRESH even though it clearly continues the previous topic.
-            # The low similarity score itself is the signal we need — if
-            # the query scored low AND history exists, try history tables
-            # before giving up entirely.
-            previous_tables = None
-            if conversation_history:
-                for turn in reversed(conversation_history):
-                    if turn.get("retrieved_tables"):
-                        previous_tables = turn["retrieved_tables"]
-                        break
+        elif is_followup:
+            print(f"           ⏭️  SKIPPED — query is a FOLLOW-UP (context-dependent, never cached)")
 
-            if previous_tables:
-                logger.info(
-                    f"All matches below threshold (best: {matches[0]['score']:.3f}). "
-                    f"Falling back to previous turn tables: {previous_tables}"
-                )
-                matches = fetch_schemas_by_ids(previous_tables, [])
-                if not matches:
-                    return {
-                        "status": "error",
-                        "message": "⚠️ Could not retrieve previous table schemas. Please rephrase your question."
-                    }
-                # Treat as follow-up since we're reusing previous tables
-                is_followup = True
+        else:
+            print(f"           🔍 Searching Redis for semantically similar cached query...")
+            cache_hit_entry = find_similar_cache(query_embedding)
+
+            if cache_hit_entry:
+                print(f"           ✅ CACHE HIT!")
+                print(f"           └─ Matched question : '{cache_hit_entry.get('question', '')}'")
+                print(f"           └─ Cached SQL       : {cache_hit_entry.get('sql', '')[:100]}{'...' if len(cache_hit_entry.get('sql', '')) > 100 else ''}")
+                print(f"           └─ Cached at        : {cache_hit_entry.get('created_at', 'N/A')}")
+                print(f"           ⏭️  Pinecone search    → SKIPPED (cache hit)")
+                print(f"           ⏭️  LLM SQL generation → SKIPPED (cache hit)")
             else:
-                # No history to fall back on — genuinely irrelevant query
-                best_score = matches[0]["score"]
-                logger.warning(f"All matches below threshold. Best score: {best_score:.3f}")
+                print(f"           ❌ CACHE MISS — no similar query found in cache.")
+                print(f"           ➡️  Proceeding with full Pinecone + LLM pipeline...")
+
+        if cache_hit_entry:
+            # ── CACHE HIT: reuse cached SQL, skip Pinecone + LLM entirely ────
+            sql = cache_hit_entry["sql"]
+            retrieved_tables = []   # not stored in cache; safe empty default
+
+        else:
+            # ── CACHE MISS (or disabled / follow-up): run full pipeline ───────
+
+            # ── Step 3: Search Pinecone for relevant schemas ─────────────────
+            print(f"\n[STEP 4]   🌲 Searching Pinecone for relevant tables...")
+            logger.info("Searching Pinecone for relevant tables...")
+            matches = search_similar(query_embedding, top_k=top_k)
+            if not matches:
+                print(f"           ❌ No matches returned from Pinecone.")
+                print("="*60 + "\n")
                 return {
                     "status": "error",
-                    "message": "🗄️ I couldn't find any relevant tables for your question. Your database may not contain data related to this topic. Please ask about data that exists in your database."
+                    "message": "⚠️ No relevant tables found for your query. Please try rephrasing your question."
                 }
-        else:
-            matches = strong_matches
 
-        already_fetched_ids = [m["id"] for m in matches]
-        logger.info(f"Directly matched tables: {already_fetched_ids}")
+            # ── Filter out low-confidence matches ────────────────────────────
+            PINECONE_SIMILARITY_THRESHOLD = 0.45
+            strong_matches = [m for m in matches if m["score"] >= PINECONE_SIMILARITY_THRESHOLD]
+            print(f"           └─ Total matches  : {len(matches)}")
+            print(f"           └─ Strong matches : {len(strong_matches)} (score >= {PINECONE_SIMILARITY_THRESHOLD})")
 
-        # ── Step 4: Auto-fetch FK-related tables missing from results ───
-        related_ids = extract_related_table_ids(matches)
-        logger.info(f"FK-related tables detected: {related_ids}")
+            if not strong_matches:
+                # ── History-based fallback ────────────────────────────────────
+                # When a query scores below the threshold, it means it doesn't
+                # directly mention any table keywords (e.g. "which has highest
+                # journey" after asking about drivers). In this case, if there
+                # is conversation history with previously retrieved tables,
+                # we reuse those tables — regardless of whether the LLM
+                # classified the query as FOLLOW_UP or FRESH.
+                #
+                # Why ignore is_followup here?
+                # The FOLLOWUP_DETECTION_PROMPT looks for pronouns ("them",
+                # "those") or phrases like "also show". A query like "which has
+                # highest journey" has none of those markers, so it gets tagged
+                # FRESH even though it clearly continues the previous topic.
+                # The low similarity score itself is the signal we need — if
+                # the query scored low AND history exists, try history tables
+                # before giving up entirely.
+                previous_tables = None
+                if conversation_history:
+                    for turn in reversed(conversation_history):
+                        if turn.get("retrieved_tables"):
+                            previous_tables = turn["retrieved_tables"]
+                            break
 
-        extra_matches = fetch_schemas_by_ids(related_ids, already_fetched_ids)
-        all_matches = matches + extra_matches
+                if previous_tables:
+                    logger.info(
+                        f"All matches below threshold (best: {matches[0]['score']:.3f}). "
+                        f"Falling back to previous turn tables: {previous_tables}"
+                    )
+                    print(f"           ⚠️  All scores below threshold (best: {matches[0]['score']:.3f}).")
+                    print(f"           └─ Falling back to previous turn tables : {previous_tables}")
+                    matches = fetch_schemas_by_ids(previous_tables, [])
+                    if not matches:
+                        print("="*60 + "\n")
+                        return {
+                            "status": "error",
+                            "message": "⚠️ Could not retrieve previous table schemas. Please rephrase your question."
+                        }
+                    # Treat as follow-up since we're reusing previous tables
+                    is_followup = True
+                else:
+                    # No history to fall back on — genuinely irrelevant query
+                    best_score = matches[0]["score"]
+                    logger.warning(f"All matches below threshold. Best score: {best_score:.3f}")
+                    print(f"           ❌ All scores below threshold (best: {best_score:.3f}). No history fallback.")
+                    print("="*60 + "\n")
+                    return {
+                        "status": "error",
+                        "message": "🗄️ I couldn't find any relevant tables for your question. Your database may not contain data related to this topic. Please ask about data that exists in your database."
+                    }
+            else:
+                matches = strong_matches
 
-        retrieved_tables = [m["id"] for m in all_matches]
-        logger.info(f"Final tables sent to LLM: {retrieved_tables}")
+            already_fetched_ids = [m["id"] for m in matches]
+            logger.info(f"Directly matched tables: {already_fetched_ids}")
+            print(f"           └─ Matched tables : {already_fetched_ids}")
 
-        # ── Step 5: Build schema context for LLM ───────────────────────
-        schema_context = build_schema_context(all_matches)
+            # ── Step 4: Auto-fetch FK-related tables missing from results ────
+            related_ids = extract_related_table_ids(matches)
+            logger.info(f"FK-related tables detected: {related_ids}")
 
-        # ── Step 6: Generate SQL using Groq LLM ────────────────────────
-        # If follow-up → send conversation history as context
-        # If fresh     → send no history (clean slate)
-        logger.info("Generating SQL with Groq...")
-        llm_result = generate_sql(
-            nl_query,
-            schema_context,
-            conversation_history=conversation_history if is_followup else None
-        )
-        if llm_result["status"] != "success":
-            return {
-                "status": "error",
-                "message": "⚠️ I couldn't generate a valid query for your request. Please try rephrasing your question."
-            }
+            extra_matches = fetch_schemas_by_ids(related_ids, already_fetched_ids)
+            all_matches = matches + extra_matches
 
-        sql = llm_result["sql"]
+            retrieved_tables = [m["id"] for m in all_matches]
+            logger.info(f"Final tables sent to LLM: {retrieved_tables}")
+            if related_ids:
+                print(f"           └─ FK-related tables fetched : {related_ids}")
+            print(f"           └─ Final tables for LLM      : {retrieved_tables}")
 
-        # ── Step 7: Hard block destructive SQL even if LLM slips ───────
-        if is_destructive_sql(sql):
-            logger.warning(f"LLM generated destructive SQL despite classification: {sql}")
-            return {
-                "status": "error",
-                "message": "🚫 This assistant is read-only. Queries that delete, update, insert, or modify data are not allowed."
-            }
+            # ── Step 5: Build schema context for LLM ─────────────────────────
+            schema_context = build_schema_context(all_matches)
 
-        # ── Step 8: Execute SQL on SQL Server ──────────────────────────
+            # ── Step 6: Generate SQL using Groq LLM ──────────────────────────
+            # If follow-up → send conversation history as context
+            # If fresh     → send no history (clean slate)
+            print(f"\n[STEP 5]   🤖 Generating SQL with Groq LLM...")
+            logger.info("Generating SQL with Groq...")
+            llm_result = generate_sql(
+                nl_query,
+                schema_context,
+                conversation_history=conversation_history if is_followup else None
+            )
+            if llm_result["status"] != "success":
+                print(f"           ❌ LLM SQL generation FAILED.")
+                print("="*60 + "\n")
+                return {
+                    "status": "error",
+                    "message": "⚠️ I couldn't generate a valid query for your request. Please try rephrasing your question."
+                }
+
+            sql = llm_result["sql"]
+            print(f"           ✅ SQL generated : {sql[:100]}{'...' if len(sql) > 100 else ''}")
+
+            # ── Step 7: Hard block destructive SQL even if LLM slips ─────────
+            if is_destructive_sql(sql):
+                logger.warning(f"LLM generated destructive SQL despite classification: {sql}")
+                print(f"\n🚫 BLOCKED: Destructive SQL detected in LLM output — pipeline stopped.")
+                print("="*60 + "\n")
+                return {
+                    "status": "error",
+                    "message": "🚫 This assistant is read-only. Queries that delete, update, insert, or modify data are not allowed."
+                }
+
+            # ── Store result in Redis cache ───────────────────────────────────
+            # Only store if: cache enabled AND not a follow-up AND SQL succeeded
+            print(f"\n[CACHE]    💾 Cache Write Check")
+            if not CACHE_ENABLED:
+                print(f"           ⏭️  SKIPPED — cache is DISABLED (CACHE_ENABLED=false)")
+            elif is_followup:
+                print(f"           ⏭️  SKIPPED — follow-up queries are NOT cached")
+            else:
+                print(f"           🔍 Checking for duplicates before storing...")
+                stored = store_in_cache(
+                    question=nl_query,
+                    embedding=query_embedding,
+                    sql=sql,
+                )
+                if stored:
+                    print(f"           ✅ STORED — new cache entry saved successfully.")
+                else:
+                    print(f"           ⏭️  SKIPPED — similar entry already exists in cache (duplicate prevention).")
+
+        # ── Step 8: Execute SQL on SQL Server ────────────────────────────────
+        print(f"\n[STEP 6]   🗄️  Executing SQL on database...")
         logger.info(f"Executing SQL: {sql}")
         db_result = execute_query(sql)
         if db_result["status"] != "success":
             raw_msg = db_result.get("message", "")
             logger.error(f"DB execution error: {raw_msg}")
+            print(f"           ❌ DB execution FAILED : {raw_msg}")
+            print("="*60 + "\n")
 
             if any(code in raw_msg for code in ["42000", "42S02", "42S22"]):
                 return {
@@ -356,8 +447,10 @@ def run_pipeline(nl_query: str, top_k: int = 10, conversation_history: list = No
         all_rows = db_result["rows"]
         display_rows = all_rows[:10]
         total_rows = len(all_rows)
+        print(f"           ✅ Executed — {total_rows} row(s) returned, {len(columns)} column(s)")
 
-        # ── Step 9: Generate human-friendly summary ─────────────────────
+        # ── Step 9: Generate human-friendly summary ───────────────────────────
+        print(f"\n[STEP 7]   📝 Generating summary...")
         logger.info("Generating summary...")
         summary_result = generate_summary(nl_query, sql, columns, display_rows)
         summary = (
@@ -365,12 +458,20 @@ def run_pipeline(nl_query: str, top_k: int = 10, conversation_history: list = No
             if summary_result["status"] == "success"
             else "Query executed successfully."
         )
+        print(f"           ✅ Summary generated.")
 
-        # ── Step 10: Save CSV if rows > 10 ──────────────────────────────
+        # ── Step 10: Save CSV if rows > 10 ───────────────────────────────────
         csv_path = None
         if total_rows > 10:
             safe_name = "".join(c if c.isalnum() else "_" for c in nl_query[:30])
             csv_path = save_csv(columns, all_rows, f"{safe_name}.csv")
+            print(f"\n[STEP 8]   📁 CSV exported : {csv_path}")
+
+        print(f"\n✅ PIPELINE COMPLETE")
+        print(f"   Source   : {'⚡ REDIS CACHE  (Pinecone + LLM skipped)' if cache_hit_entry else '🔄 FULL PIPELINE (Pinecone + LLM used)'}")
+        print(f"   Rows     : {total_rows}")
+        print(f"   Follow-up: {is_followup}")
+        print("="*60 + "\n")
 
         return {
             "status": "success",
@@ -388,6 +489,8 @@ def run_pipeline(nl_query: str, top_k: int = 10, conversation_history: list = No
 
     except Exception as e:
         logger.error(f"Pipeline failed for query '{nl_query}': {e}", exc_info=True)
+        print(f"\n❌ PIPELINE ERROR: {e}")
+        print("="*60 + "\n")
         return {
             "status": "error",
             "message": "⚠️ Something went wrong while processing your request. Please try again."

@@ -35,3 +35,14 @@ SCHEMA_METADATA_PATH = os.path.join(
     os.path.dirname(__file__), "data", "schema_metadata.json"
 )
 
+REDIS_HOST     = os.getenv("REDIS_HOST", "localhost")
+REDIS_PORT     = int(os.getenv("REDIS_PORT", "6379"))
+REDIS_DB       = int(os.getenv("REDIS_DB", "0"))
+REDIS_PASSWORD = os.getenv("REDIS_PASSWORD") or None
+ 
+# ── Semantic Cache ────────────────────────────────────────────────────────────
+CACHE_ENABLED     = os.getenv("CACHE_ENABLED", "true").lower() == "true"
+CACHE_TTL_ENABLED = os.getenv("CACHE_TTL_ENABLED", "true").lower() == "true"
+CACHE_LRU_ENABLED = os.getenv("CACHE_LRU_ENABLED", "false").lower() == "true"
+CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", "3600"))
+SIMILARITY_THRESHOLD = float(os.getenv("SIMILARITY_THRESHOLD", "0.90"))
