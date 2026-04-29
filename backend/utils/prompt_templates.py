@@ -164,25 +164,32 @@ Reply with ONLY one of these three words: ALLOWED, BLOCKED_DESTRUCTIVE, BLOCKED_
 
 
 
+FOLLOWUP_DETECTION_PROMPT = """You are analyzing whether a new question is a follow-up to a conversation.
 
-FOLLOWUP_DETECTION_PROMPT = """You are a query intent classifier.
-
-Given the conversation history and a new question, decide if the new question is a FOLLOW_UP to the previous queries or a FRESH new question.
-
-FOLLOW_UP means:
-- Uses pronouns like "them", "those", "it", "they", "these"
-- Says "also show", "add", "include", "filter those", "sort them"
-- Refers to previous results like "from those", "of them", "same ones"
-- Asks for more detail about previous results
-
-FRESH means:
-- Completely new topic unrelated to history
-- Asks about a different table or entity
-- No reference to previous queries
-
-Conversation History:
+Conversation history:
 {conversation_history}
 
-New Question: "{nl_query}"
+New question: {nl_query}
 
-Reply with ONLY one word: FOLLOW_UP or FRESH"""
+A question IS a follow-up if ANY of these are true:
+- It uses pronouns referring to previous results: "them", "those", "it", "they", "these", "that"
+- It says "also", "as well", "too", "additionally", "furthermore"
+- It asks for more detail about something mentioned in a previous answer (e.g. a name, ID, or value that appeared in previous results)
+- It uses words like "detail", "details", "more", "info", "information", "show me more", "tell me more" about a specific item
+- The specific value it mentions (like a name, code, or ID) appeared in the previous query results
+- It references a specific record or entity by name that was returned in previous results
+
+A question is NOT a follow-up if:
+- It introduces a completely new topic unrelated to previous queries
+- It asks about a different entity not mentioned before
+
+Examples of follow-ups:
+- Previous result showed driver "SAM Test 1" → "give me detail of sam test 1" = FOLLOW_UP
+- Previous result showed drivers → "how many are active?" = FOLLOW_UP  
+- Previous result showed orders → "show me their details" = FOLLOW_UP
+
+Examples of fresh queries:
+- "show me all customers" after asking about drivers = FRESH
+- "what is the weather today" = FRESH
+
+Respond with exactly one word: FOLLOW_UP or FRESH"""
