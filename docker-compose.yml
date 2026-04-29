@@ -1,0 +1,80 @@
+version: "3.9"
+
+# =============================================================================
+# docker-compose.yml
+# =============================================================================
+# Run only what is necessary:
+#   - nl2sql-redis : the Redis server your backend connects to (REQUIRED)
+#   - redisinsight  : GUI for debugging Redis — only start when you need it
+#                     (comment it out in production / when RAM is tight)
+#
+# To start only Redis (recommended for low RAM):
+#   docker compose up nl2sql-redis -d
+#
+# To also open RedisInsight for debugging:
+#   docker compose up nl2sql-redis redisinsight -d
+# =============================================================================
+
+services:
+
+  # ── Redis Server (REQUIRED) ─────────────────────────────────────────────────
+  nl2sql-redis:
+    image: redis:7-alpine          # alpine = much smaller image than redis:7
+    container_name: nl2sql-redis
+    restart: unless-stopped
+
+    # ── Hard memory cap ───────────────────────────────────────────────────────
+    # Docker will kill the container before it goes above this.
+    # Adjust based on your machine:
+    #   Low RAM machine  (8GB total)  → 256mb
+    #   Medium           (16GB total) → 512mb
+    #   Comfortable      (32GB total) → 1gb
+    mem_limit: 256m
+    memswap_limit: 256m            # disables swap for this container
+
+    ports:
+      - "6379:6379"
+
+    # ── Redis config passed inline ─────────────────────────────────────────────
+    # maxmemory      → Redis itself will also enforce this limit internally
+    # maxmemory-policy → when full, evict the least-recently-used key (LRU)
+    # save ""        → disable AOF/RDB persistence (no disk writes = less I/O)
+    # loglevel warning → reduce Redis log noise
+    command: >
+      redis-server
+      --maxmemory 200mb
+      --maxmemory-policy allkeys-lru
+      --save ""
+      --appendonly no
+      --loglevel warning
+
+    networks:
+      - nl2sql-net
+
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ── RedisInsight GUI (OPTIONAL — only for debugging) ───────────────────────
+  # Comment this entire block out when not actively debugging.
+  # It uses ~200-300MB RAM on its own — do NOT run it in production.
+  #
+  # redisinsight:
+  #   image: redis/redisinsight:latest
+  #   container_name: redisinsight
+  #   restart: unless-stopped
+  #   mem_limit: 300m
+  #   memswap_limit: 300m
+  #   ports:
+  #     - "5540:5540"
+  #   depends_on:
+  #     nl2sql-redis:
+  #       condition: service_healthy
+  #   networks:
+  #     - nl2sql-net
+
+networks:
+  nl2sql-net:
+    driver: bridge
