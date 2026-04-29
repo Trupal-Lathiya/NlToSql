@@ -196,20 +196,11 @@ def run_pipeline(nl_query: str, top_k: int = 10, conversation_history: list = No
         print(f"   Cache : {'ENABLED' if CACHE_ENABLED else 'DISABLED'}")
         print("="*60)
 
-        # ── Steps 0 & 1 (PARALLEL): Classify query + Embed query at the same time
-        #
-        # ✅ FIX 1 applied here:
-        #    Previously: classify_query() ran, finished (~1-2s), THEN embed_text()
-        #    started (~1-2s). Total: ~2-4s wasted waiting sequentially.
-        #
-        #    Now: both submit to a thread pool and run simultaneously.
-        #    Total wait = max(classify_time, embed_time) instead of their sum.
-        #    Saves ~1-2 seconds on every single query.
-        #
+        # ── Step 1 (PARALLEL): Classify query + Embed query at the same time
         logger.info(f"Running classifier and embedding in parallel for: {nl_query}")
         print(f"\n[STEP 1]   ⚙️  Running classifier + embedding in parallel...")
         with ThreadPoolExecutor(max_workers=2) as executor:
-            future_classify = executor.submit(classify_query, nl_query, conversation_history)  # <-- add conversation_history
+            future_classify = executor.submit(classify_query, nl_query, conversation_history)
             future_embed    = executor.submit(embed_text, nl_query)
 
             classification  = future_classify.result()
@@ -237,23 +228,20 @@ def run_pipeline(nl_query: str, top_k: int = 10, conversation_history: list = No
                 "message": "🗄️ Please ask a question related to your database — for example: 'Show me all drivers' or 'How many orders were placed this week?'"
             }
 
-        # ── Step 2: Detect if query is follow-up using conversation history ─
-        is_followup = detect_followup(nl_query, conversation_history or [])
-        logger.info(f"Follow-up detection for '{nl_query}': {is_followup}")
-        print(f"\n[STEP 2]   🔗 Follow-up detection : {'YES' if is_followup else 'NO'}")
-
-        # ── Step 3: Redis semantic cache lookup ──────────────────────────────
-        # Cache is SKIPPED entirely for follow-up queries because they depend
-        # on prior conversation context and must go through the full pipeline.
+        # ── Step 2: Redis semantic cache lookup FIRST ─────────────────────────
+        # ✅ FIX APPLIED:
+        #    Previously: follow-up detection ran first, and if YES → cache was
+        #    skipped entirely, even for identical repeated queries.
+        #
+        #    Now: cache is checked BEFORE follow-up detection.
+        #    If the same query was asked before and is cached → return instantly.
+        #    Follow-up detection only runs on a CACHE MISS.
+        #
         cache_hit_entry = None
 
-        print(f"\n[STEP 3]   🗃️  Redis Cache Check")
+        print(f"\n[STEP 2]   🗃️  Redis Cache Check")
         if not CACHE_ENABLED:
             print(f"           ⏭️  SKIPPED — cache is DISABLED in config (CACHE_ENABLED=false)")
-
-        elif is_followup:
-            print(f"           ⏭️  SKIPPED — query is a FOLLOW-UP (context-dependent, never cached)")
-
         else:
             print(f"           🔍 Searching Redis for semantically similar cached query...")
             cache_hit_entry = find_similar_cache(query_embedding)
@@ -263,21 +251,28 @@ def run_pipeline(nl_query: str, top_k: int = 10, conversation_history: list = No
                 print(f"           └─ Matched question : '{cache_hit_entry.get('question', '')}'")
                 print(f"           └─ Cached SQL       : {cache_hit_entry.get('sql', '')[:100]}{'...' if len(cache_hit_entry.get('sql', '')) > 100 else ''}")
                 print(f"           └─ Cached at        : {cache_hit_entry.get('created_at', 'N/A')}")
+                print(f"           ⏭️  Follow-up detection → SKIPPED (cache hit)")
                 print(f"           ⏭️  Pinecone search    → SKIPPED (cache hit)")
                 print(f"           ⏭️  LLM SQL generation → SKIPPED (cache hit)")
             else:
                 print(f"           ❌ CACHE MISS — no similar query found in cache.")
-                print(f"           ➡️  Proceeding with full Pinecone + LLM pipeline...")
+                print(f"           ➡️  Proceeding with follow-up detection + full pipeline...")
 
         if cache_hit_entry:
-            # ── CACHE HIT: reuse cached SQL, skip Pinecone + LLM entirely ────
+            # ── CACHE HIT: reuse cached SQL, skip everything else ─────────────
             sql = cache_hit_entry["sql"]
-            retrieved_tables = []   # not stored in cache; safe empty default
+            retrieved_tables = []
+            is_followup = False  # cache hit is treated as a fresh resolved query
 
         else:
-            # ── CACHE MISS (or disabled / follow-up): run full pipeline ───────
+            # ── CACHE MISS: now detect follow-up and run full pipeline ─────────
 
-            # ── Step 3: Search Pinecone for relevant schemas ─────────────────
+            # ── Step 3: Detect if query is follow-up using conversation history ─
+            is_followup = detect_followup(nl_query, conversation_history or [])
+            logger.info(f"Follow-up detection for '{nl_query}': {is_followup}")
+            print(f"\n[STEP 3]   🔗 Follow-up detection : {'YES' if is_followup else 'NO'}")
+
+            # ── Step 4: Search Pinecone for relevant schemas ──────────────────
             print(f"\n[STEP 4]   🌲 Searching Pinecone for relevant tables...")
             logger.info("Searching Pinecone for relevant tables...")
             matches = search_similar(query_embedding, top_k=top_k)
@@ -289,7 +284,7 @@ def run_pipeline(nl_query: str, top_k: int = 10, conversation_history: list = No
                     "message": "⚠️ No relevant tables found for your query. Please try rephrasing your question."
                 }
 
-            # ── Filter out low-confidence matches ────────────────────────────
+            # ── Filter out low-confidence matches ─────────────────────────────
             PINECONE_SIMILARITY_THRESHOLD = 0.45
             strong_matches = [m for m in matches if m["score"] >= PINECONE_SIMILARITY_THRESHOLD]
             print(f"           └─ Total matches  : {len(matches)}")
@@ -297,21 +292,6 @@ def run_pipeline(nl_query: str, top_k: int = 10, conversation_history: list = No
 
             if not strong_matches:
                 # ── History-based fallback ────────────────────────────────────
-                # When a query scores below the threshold, it means it doesn't
-                # directly mention any table keywords (e.g. "which has highest
-                # journey" after asking about drivers). In this case, if there
-                # is conversation history with previously retrieved tables,
-                # we reuse those tables — regardless of whether the LLM
-                # classified the query as FOLLOW_UP or FRESH.
-                #
-                # Why ignore is_followup here?
-                # The FOLLOWUP_DETECTION_PROMPT looks for pronouns ("them",
-                # "those") or phrases like "also show". A query like "which has
-                # highest journey" has none of those markers, so it gets tagged
-                # FRESH even though it clearly continues the previous topic.
-                # The low similarity score itself is the signal we need — if
-                # the query scored low AND history exists, try history tables
-                # before giving up entirely.
                 previous_tables = None
                 if conversation_history:
                     for turn in reversed(conversation_history):
@@ -333,10 +313,8 @@ def run_pipeline(nl_query: str, top_k: int = 10, conversation_history: list = No
                             "status": "error",
                             "message": "⚠️ Could not retrieve previous table schemas. Please rephrase your question."
                         }
-                    # Treat as follow-up since we're reusing previous tables
                     is_followup = True
                 else:
-                    # No history to fall back on — genuinely irrelevant query
                     best_score = matches[0]["score"]
                     logger.warning(f"All matches below threshold. Best score: {best_score:.3f}")
                     print(f"           ❌ All scores below threshold (best: {best_score:.3f}). No history fallback.")
@@ -352,7 +330,7 @@ def run_pipeline(nl_query: str, top_k: int = 10, conversation_history: list = No
             logger.info(f"Directly matched tables: {already_fetched_ids}")
             print(f"           └─ Matched tables : {already_fetched_ids}")
 
-            # ── Step 4: Auto-fetch FK-related tables missing from results ────
+            # ── Auto-fetch FK-related tables missing from results ─────────────
             related_ids = extract_related_table_ids(matches)
             logger.info(f"FK-related tables detected: {related_ids}")
 
@@ -369,8 +347,6 @@ def run_pipeline(nl_query: str, top_k: int = 10, conversation_history: list = No
             schema_context = build_schema_context(all_matches)
 
             # ── Step 6: Generate SQL using Groq LLM ──────────────────────────
-            # If follow-up → send conversation history as context
-            # If fresh     → send no history (clean slate)
             print(f"\n[STEP 5]   🤖 Generating SQL with Groq LLM...")
             logger.info("Generating SQL with Groq...")
             llm_result = generate_sql(
@@ -389,7 +365,7 @@ def run_pipeline(nl_query: str, top_k: int = 10, conversation_history: list = No
             sql = llm_result["sql"]
             print(f"           ✅ SQL generated : {sql[:100]}{'...' if len(sql) > 100 else ''}")
 
-            # ── Step 7: Hard block destructive SQL even if LLM slips ─────────
+            # ── Hard block destructive SQL even if LLM slips ─────────────────
             if is_destructive_sql(sql):
                 logger.warning(f"LLM generated destructive SQL despite classification: {sql}")
                 print(f"\n🚫 BLOCKED: Destructive SQL detected in LLM output — pipeline stopped.")
@@ -399,8 +375,7 @@ def run_pipeline(nl_query: str, top_k: int = 10, conversation_history: list = No
                     "message": "🚫 This assistant is read-only. Queries that delete, update, insert, or modify data are not allowed."
                 }
 
-            # ── Store result in Redis cache ───────────────────────────────────
-            # Only store if: cache enabled AND not a follow-up AND SQL succeeded
+            # ── Cache Write — only if cache enabled AND not a follow-up ───────
             print(f"\n[CACHE]    💾 Cache Write Check")
             if not CACHE_ENABLED:
                 print(f"           ⏭️  SKIPPED — cache is DISABLED (CACHE_ENABLED=false)")
@@ -418,7 +393,7 @@ def run_pipeline(nl_query: str, top_k: int = 10, conversation_history: list = No
                 else:
                     print(f"           ⏭️  SKIPPED — similar entry already exists in cache (duplicate prevention).")
 
-        # ── Step 8: Execute SQL on SQL Server ────────────────────────────────
+        # ── Step 6: Execute SQL on SQL Server ────────────────────────────────
         print(f"\n[STEP 6]   🗄️  Executing SQL on database...")
         logger.info(f"Executing SQL: {sql}")
         db_result = execute_query(sql)
@@ -449,7 +424,7 @@ def run_pipeline(nl_query: str, top_k: int = 10, conversation_history: list = No
         total_rows = len(all_rows)
         print(f"           ✅ Executed — {total_rows} row(s) returned, {len(columns)} column(s)")
 
-        # ── Step 9: Generate human-friendly summary ───────────────────────────
+        # ── Step 7: Generate human-friendly summary ───────────────────────────
         print(f"\n[STEP 7]   📝 Generating summary...")
         logger.info("Generating summary...")
         summary_result = generate_summary(nl_query, sql, columns, display_rows)
@@ -460,7 +435,7 @@ def run_pipeline(nl_query: str, top_k: int = 10, conversation_history: list = No
         )
         print(f"           ✅ Summary generated.")
 
-        # ── Step 10: Save CSV if rows > 10 ───────────────────────────────────
+        # ── Step 8: Save CSV if rows > 10 ────────────────────────────────────
         csv_path = None
         if total_rows > 10:
             safe_name = "".join(c if c.isalnum() else "_" for c in nl_query[:30])
@@ -483,7 +458,7 @@ def run_pipeline(nl_query: str, top_k: int = 10, conversation_history: list = No
             "all_rows": all_rows,
             "total_row_count": total_rows,
             "summary": summary,
-            "is_followup": is_followup,      # ← new: tells frontend if follow-up
+            "is_followup": is_followup,
             "csv_path": csv_path
         }
 
