@@ -268,8 +268,9 @@ def run_pipeline(nl_query: str, top_k: int = 10, conversation_history: list = No
             # ── CACHE MISS: now detect follow-up and run full pipeline ─────────
 
             # ── Step 3: Detect if query is follow-up using conversation history ─
-            is_followup = detect_followup(nl_query, conversation_history or [])
-            logger.info(f"Follow-up detection for '{nl_query}': {is_followup}")
+            # is_followup = detect_followup(nl_query, conversation_history or [])
+            # logger.info(f"Follow-up detection for '{nl_query}': {is_followup}")
+            is_followup = False
             print(f"\n[STEP 3]   🔗 Follow-up detection : {'YES' if is_followup else 'NO'}")
 
             # ── Step 4: Search Pinecone for relevant schemas ──────────────────
@@ -285,7 +286,7 @@ def run_pipeline(nl_query: str, top_k: int = 10, conversation_history: list = No
                 }
 
             # ── Filter out low-confidence matches ─────────────────────────────
-            PINECONE_SIMILARITY_THRESHOLD = 0.45
+            PINECONE_SIMILARITY_THRESHOLD = 0.35
             strong_matches = [m for m in matches if m["score"] >= PINECONE_SIMILARITY_THRESHOLD]
             print(f"           └─ Total matches  : {len(matches)}")
             print(f"           └─ Strong matches : {len(strong_matches)} (score >= {PINECONE_SIMILARITY_THRESHOLD})")
