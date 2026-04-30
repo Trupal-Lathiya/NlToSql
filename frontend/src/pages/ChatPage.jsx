@@ -1,9 +1,9 @@
-import { useState, useEffect, useRef } from "react";
-import { sendQuery, getFollowupQuestions } from "../services/apiClient";
+import { useState, useRef, useEffect } from "react";
+import { sendQueryStreaming, getFollowupQuestions } from "../services/apiClient";
 import SqlDisplay from "../components/SqlDisplay";
 import ResultsTable from "../components/ResultsTable";
 
-export default function ChatPage({ history, addEntry, getMemoryWindow }) {
+export default function ChatPage({ history, addEntry, updateEntry, getMemoryWindow }) {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [followupMap, setFollowupMap] = useState({});
@@ -13,16 +13,17 @@ export default function ChatPage({ history, addEntry, getMemoryWindow }) {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [history, loading]);
 
-  // After a successful entry is added, fetch follow-up questions for it
+  // ── Fetch follow-up suggestions when the last entry changes ───────────────
   useEffect(() => {
+    if (!history.length) return;
     const lastEntry = history[history.length - 1];
+
     if (
-      !lastEntry ||
       lastEntry.status !== "success" ||
+      !lastEntry.summary ||           // wait until summary has arrived
       followupMap[lastEntry.id] !== undefined
     ) return;
 
-    // Mark as loading so we don't re-fetch
     setFollowupMap((prev) => ({ ...prev, [lastEntry.id]: "loading" }));
 
     getFollowupQuestions({
@@ -38,7 +39,7 @@ export default function ChatPage({ history, addEntry, getMemoryWindow }) {
     });
   }, [history]);
 
-  const handleSend = async (queryText) => {
+  const handleSend = (queryText) => {
     const query = (queryText || input).trim();
     if (!query || loading) return;
     setInput("");
@@ -48,9 +49,52 @@ export default function ChatPage({ history, addEntry, getMemoryWindow }) {
     const memoryWindow = getMemoryWindow();
     const memoryCount = memoryWindow.length;
 
-    const result = await sendQuery(query, memoryWindow);
-    addEntry({ ...result, nl_query: query, timestamp, memoryCount });
-    setLoading(false);
+    // Create a placeholder entry immediately so the user sees their question
+    const entryId = `entry-${Date.now()}`;
+    const placeholderEntry = {
+      id: entryId,
+      nl_query: query,
+      timestamp,
+      memoryCount,
+      status: "loading",  // special state: DB done, summary pending
+    };
+    addEntry(placeholderEntry);
+
+    // ── Start streaming ───────────────────────────────────────────────────────
+    sendQueryStreaming(query, memoryWindow, {
+
+      // Called as soon as DB rows are ready — render table immediately
+      onResult: (data) => {
+        updateEntry(entryId, {
+          ...data,
+          nl_query: query,
+          timestamp,
+          memoryCount,
+          status: "success",
+          summary: null,          // summary not yet available — show spinner
+          _summaryPending: true,  // flag so the UI can show a loading indicator
+        });
+        // Keep setLoading(true) — input is still disabled until done
+      },
+
+      // Called when LLM summary arrives — just patch summary onto the entry
+      onSummary: ({ summary }) => {
+        updateEntry(entryId, { summary, _summaryPending: false });
+      },
+
+      onDone: () => {
+        setLoading(false);
+      },
+
+      onError: (data) => {
+        updateEntry(entryId, {
+          status: "error",
+          message: data.message,
+          _summaryPending: false,
+        });
+        setLoading(false);
+      },
+    });
   };
 
   const handleKeyDown = (e) => {
@@ -93,13 +137,14 @@ export default function ChatPage({ history, addEntry, getMemoryWindow }) {
             isLast &&
             !loading &&
             entry.status === "success" &&
+            !entry._summaryPending &&
             Array.isArray(followups) &&
             followups.length > 0;
 
           return (
             <div key={entry.id} className="message-group">
 
-              {/* User bubble with memory indicator */}
+              {/* User bubble */}
               <div className="user-row">
                 <div className="user-bubble">
                   {entry.nl_query}
@@ -124,11 +169,13 @@ export default function ChatPage({ history, addEntry, getMemoryWindow }) {
               <div className="assistant-row">
                 <span className="msg-avatar">🗄️</span>
                 <div className="assistant-bubble">
-                  {entry.status === "error" ? (
+                  {entry.status === "loading" ? (
+                    /* Still waiting for DB result */
+                    <div className="dots"><span /><span /><span /></div>
+                  ) : entry.status === "error" ? (
                     <div className="msg-error">❌ {entry.message}</div>
                   ) : (
                     <>
-                      {/* Context used indicator */}
                       {entry.memoryCount > 0 && entry.is_followup && (
                         <div className="followup-badge">
                           🔗 Follow-up — used {entry.memoryCount} previous quer{entry.memoryCount === 1 ? "y" : "ies"} as context
@@ -139,20 +186,36 @@ export default function ChatPage({ history, addEntry, getMemoryWindow }) {
                           🆕 Fresh query — previous context ignored
                         </div>
                       )}
+
+                      {/* ── Summary section ── */}
                       <div className="msg-summary">
-                        {entry.summary || "Query executed successfully."}
+                        {entry._summaryPending ? (
+                          /* DB done — summary still loading */
+                          <span className="summary-loading">
+                            <span className="followup-dot" />
+                            <span className="followup-dot" />
+                            <span className="followup-dot" />
+                            <span style={{ fontSize: "0.8rem", color: "var(--color-text-secondary, #64748b)", marginLeft: "8px" }}>
+                              Generating summary…
+                            </span>
+                          </span>
+                        ) : (
+                          entry.summary || "Query executed successfully."
+                        )}
                       </div>
+
+                      {/* ── Table always shows as soon as DB result arrives ── */}
                       <SqlDisplay sql={entry.sql} retrievedTables={entry.retrieved_tables} />
                       {entry.columns && entry.rows != null && (
                         <ResultsTable
                           columns={entry.columns}
                           rows={entry.rows}
-                          allRows={entry.all_rows}      
+                          allRows={entry.all_rows}
                           totalRowCount={entry.total_row_count}
                         />
                       )}
 
-                      {/* Follow-up questions chips */}
+                      {/* Follow-up questions */}
                       {showFollowups && (
                         <div className="followup-questions">
                           <div className="followup-questions-label">💡 Suggested follow-ups</div>
@@ -171,8 +234,7 @@ export default function ChatPage({ history, addEntry, getMemoryWindow }) {
                         </div>
                       )}
 
-                      {/* Loading state for follow-up questions */}
-                      {isLast && !loading && followups === "loading" && entry.status === "success" && (
+                      {isLast && !loading && followups === "loading" && entry.status === "success" && !entry._summaryPending && (
                         <div className="followup-questions-loading">
                           <span className="followup-dot" /><span className="followup-dot" /><span className="followup-dot" />
                           <span style={{ fontSize: "0.75rem", color: "var(--color-text-secondary, #64748b)", marginLeft: "6px" }}>
@@ -189,8 +251,9 @@ export default function ChatPage({ history, addEntry, getMemoryWindow }) {
           );
         })}
 
-        {loading && (
-          <div className="assistant-row">
+        {/* Global thinking indicator — only shown before the first event arrives */}
+        {loading && history[history.length - 1]?.status === "loading" && (
+          <div className="assistant-row" style={{ marginTop: "-12px" }}>
             <span className="msg-avatar">🗄️</span>
             <div className="assistant-bubble thinking">
               <div className="dots"><span /><span /><span /></div>

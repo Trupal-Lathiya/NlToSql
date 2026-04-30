@@ -6,7 +6,7 @@ import HistoryPage from "./pages/HistoryPage";
 import QueryPage from "./pages/QueryPage";
 
 export default function App() {
-  const { history, addEntry, clearHistory, deleteEntry, getMemoryWindow } = useHistory();
+  const { history, addEntry, updateEntry, clearHistory, deleteEntry, getMemoryWindow } = useHistory();
 
   return (
     <BrowserRouter>
@@ -20,6 +20,7 @@ export default function App() {
                 <ChatPage
                   history={history}
                   addEntry={addEntry}
+                  updateEntry={updateEntry}
                   getMemoryWindow={getMemoryWindow}
                 />
               }
