@@ -374,7 +374,11 @@ async def run_pipeline_streaming(nl_query: str, top_k: int = 10, conversation_hi
     import json
 
     def _emit(event: str, data: dict) -> str:
-        return f"data: {json.dumps({'event': event, 'data': data})}\n\n"
+        def _serializer(obj):
+            if hasattr(obj, "isoformat"):
+                return obj.isoformat()
+            raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+        return f"data: {json.dumps({'event': event, 'data': data}, default=_serializer)}\n\n"
 
     try:
         print("\n" + "="*60)
@@ -467,6 +471,8 @@ async def run_pipeline_streaming(nl_query: str, top_k: int = 10, conversation_hi
     except Exception as e:
         logger.error(f"Streaming pipeline failed for query '{nl_query}': {e}", exc_info=True)
         print(f"\n❌ STREAMING PIPELINE ERROR: {e}")
+        if 'sql' in locals():
+            print(f"   SQL that caused the error:\n{sql}")
         yield _emit("error", {"message": "⚠️ Something went wrong while processing your request. Please try again."})
     finally:
         executor.shutdown(wait=False)
