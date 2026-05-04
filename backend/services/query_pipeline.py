@@ -178,11 +178,19 @@ def _run_steps_1_to_5(nl_query: str, top_k: int, conversation_history: list):
     if classification == "BLOCKED_IRRELEVANT":
         return {"ok": False, "error": "🗄️ Please ask a question related to your database — for example: 'Show me all drivers' or 'How many orders were placed this week?'"}
 
-    # ── Step 2: Redis cache ───────────────────────────────────────────────────
+    # ── Step 2: Follow-up detection ──────────────────────────────────────────
+    is_followup = False
+    if conversation_history:
+        is_followup = detect_followup(nl_query, conversation_history)
+    print(f"\n[STEP 2]   🔗 Follow-up detection : {'YES' if is_followup else 'NO'}")
+
+    # ── Step 3: Redis cache (skip lookup if follow-up) ────────────────────────
     cache_hit_entry = None
-    print(f"\n[STEP 2]   🗃️  Redis Cache Check")
+    print(f"\n[STEP 3]   🗃️  Redis Cache Check")
     if not CACHE_ENABLED:
         print(f"           ⏭️  SKIPPED — cache is DISABLED")
+    elif is_followup:
+        print(f"           ⏭️  SKIPPED — follow-up query, context may differ")
     else:
         cache_hit_entry = find_similar_cache(query_embedding)
         if cache_hit_entry:
@@ -199,10 +207,6 @@ def _run_steps_1_to_5(nl_query: str, top_k: int, conversation_history: list):
             "query_embedding": query_embedding,
             "cache_hit": True,
         }
-
-    # ── Step 3: Follow-up detection ──────────────────────────────────────────
-    is_followup = False
-    print(f"\n[STEP 3]   🔗 Follow-up detection : NO")
 
     # ── Step 4: Pinecone search ───────────────────────────────────────────────
     print(f"\n[STEP 4]   🌲 Searching Pinecone for relevant tables...")
@@ -259,12 +263,10 @@ def _run_steps_1_to_5(nl_query: str, top_k: int, conversation_history: list):
     if is_destructive_sql(sql):
         return {"ok": False, "error": "🚫 This assistant is read-only. Queries that delete, update, insert, or modify data are not allowed."}
 
-    # Cache write
+    # Cache write — store ALL successful queries (follow-up or not)
     print(f"\n[CACHE]    💾 Cache Write Check")
     if not CACHE_ENABLED:
         print(f"           ⏭️  SKIPPED — cache is DISABLED")
-    elif is_followup:
-        print(f"           ⏭️  SKIPPED — follow-up queries are NOT cached")
     else:
         stored = store_in_cache(question=nl_query, embedding=query_embedding, sql=sql)
         print(f"           {'✅ STORED' if stored else '⏭️  SKIPPED (duplicate)'}")
