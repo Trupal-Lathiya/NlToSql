@@ -6,6 +6,7 @@ from utils.prompt_templates import (
     SYSTEM_PROMPT,
     SQL_GENERATION_PROMPT,
     SQL_GENERATION_WITH_MEMORY_PROMPT,
+    SQL_RETRY_PROMPT,
     FOLLOWUP_DETECTION_PROMPT,
     RESPONSE_SUMMARY_PROMPT,
     FOLLOWUP_QUESTIONS_PROMPT,
@@ -96,6 +97,77 @@ def generate_sql(nl_query: str, schema_context: str, conversation_history: list 
 
     except Exception as e:
         logger.error(f"LLM generation failed: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+def generate_sql_retry(
+    nl_query: str,
+    schema_context: str,
+    failed_sql: str,
+    error_message: str,
+    attempt: int,
+) -> dict:
+    """
+    Ask the LLM to self-correct a previously generated SQL query that failed
+    on execution.  Feeds the exact DB error message back so the model knows
+    exactly what to fix.
+
+    Args:
+        nl_query:       Original natural-language question from the user.
+        schema_context: Same schema context string used in the first generation.
+        failed_sql:     The SQL that was executed and produced the error.
+        error_message:  The raw error string returned by the database.
+        attempt:        Which retry attempt this is (1-based), shown in the prompt.
+
+    Returns:
+        {"status": "success", "sql": "<corrected SQL>"}
+        {"status": "error",   "message": "<reason>"}
+    """
+    try:
+        # Truncate the error message so we don't blow out the context window.
+        # SQL Server errors repeat the same message many times; 800 chars is plenty.
+        truncated_error = error_message[:800] if len(error_message) > 800 else error_message
+
+        prompt = SQL_RETRY_PROMPT.format(
+            nl_query=nl_query,
+            schema_context=schema_context,
+            failed_sql=failed_sql,
+            error_message=truncated_error,
+            attempt=attempt,
+        )
+
+        logger.info(f"[RETRY {attempt}] Asking LLM to self-correct SQL...")
+        print(f"           🔄 Retry attempt {attempt} — sending error back to LLM...")
+
+        response = get_client().chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user",   "content": prompt},
+            ],
+            temperature=0.1,   # keep deterministic
+            max_tokens=1024,
+        )
+
+        sql = response.choices[0].message.content.strip()
+
+        # Strip markdown fences if the model adds them despite instructions
+        if sql.startswith("```"):
+            sql = sql.split("```")[1]
+            if sql.lower().startswith("sql"):
+                sql = sql[3:]
+            sql = sql.strip()
+
+        if sql == "CANNOT_GENERATE":
+            logger.warning(f"[RETRY {attempt}] LLM returned CANNOT_GENERATE")
+            return {"status": "error", "message": "LLM could not fix the query based on the schema."}
+
+        logger.info(f"[RETRY {attempt}] Corrected SQL: {sql[:120]}{'...' if len(sql) > 120 else ''}")
+        print(f"           ✅ Retry {attempt} SQL: {sql[:100]}{'...' if len(sql) > 100 else ''}")
+        return {"status": "success", "sql": sql}
+
+    except Exception as e:
+        logger.error(f"[RETRY {attempt}] LLM retry generation failed: {e}")
         return {"status": "error", "message": str(e)}
 
 

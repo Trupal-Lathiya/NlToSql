@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from services.embedding_service import embed_text
 from services.pinecone_service import search_similar
-from services.llm_service import generate_sql, generate_summary, detect_followup
+from services.llm_service import generate_sql, generate_sql_retry, generate_summary, detect_followup
 from services.database_service import execute_query
 from services.redis_cache_service import find_similar_cache, store_in_cache
 from utils.prompt_templates import RELEVANCE_CHECK_PROMPT
@@ -23,6 +23,9 @@ BLOCKED_SQL_KEYWORDS = [
     r'\bINSERT\b', r'\bUPDATE\b', r'\bMERGE\b', r'\bEXEC\b',
     r'\bEXECUTE\b', r'\bCREATE\b', r'\bREPLACE\b',
 ]
+
+# ── How many times to ask the LLM to self-correct before giving up ────────────
+MAX_SQL_RETRIES = 2
 
 _classifier_client = Groq(api_key=GROQ_API_KEY)
 
@@ -156,12 +159,6 @@ def save_csv(columns: list, rows: list, filename: str) -> str:
 # =============================================================================
 
 def _run_steps_1_to_5(nl_query: str, top_k: int, conversation_history: list):
-    """
-    Runs steps 1-5 synchronously and returns a dict with everything needed
-    to execute SQL (or an error dict).
-    Returns: {"ok": True, "sql": ..., "retrieved_tables": ..., "is_followup": ...}
-          or {"ok": False, "error": ...}
-    """
     # ── Step 1 (PARALLEL): Classify + Embed ──────────────────────────────────
     print(f"\n[STEP 1]   ⚙️  Running classifier + embedding in parallel...")
     with ThreadPoolExecutor(max_workers=2) as executor:
@@ -206,45 +203,113 @@ def _run_steps_1_to_5(nl_query: str, top_k: int, conversation_history: list):
             "is_followup": False,
             "query_embedding": query_embedding,
             "cache_hit": True,
+            "cache_hit_id": cache_hit_entry.get("id"),
+            "schema_context": "",
         }
 
     # ── Step 4: Pinecone search ───────────────────────────────────────────────
     print(f"\n[STEP 4]   🌲 Searching Pinecone for relevant tables...")
+
+    PINECONE_SIMILARITY_THRESHOLD = 0.35
+
+    if is_followup and conversation_history:
+        # ── Get previous tables from history ──────────────────────────────────
+        previous_tables = None
+        for turn in reversed(conversation_history):
+            if turn.get("retrieved_tables"):
+                previous_tables = turn["retrieved_tables"]
+                break
+
+        if previous_tables:
+            print(f"           🔗 Follow-up — loading previous tables : {previous_tables}")
+
+            # ── Also search Pinecone with current query to catch NEW tables ───
+            # e.g. user says "give me their name with asset name" — Asset table
+            # was not in the previous query but is needed now.
+            print(f"           🔍 Also searching Pinecone for any NEW tables in this follow-up...")
+            try:
+                fresh_matches = search_similar(query_embedding, top_k=top_k)
+                fresh_strong  = [m for m in fresh_matches if m["score"] >= PINECONE_SIMILARITY_THRESHOLD]
+                fresh_ids     = [m["id"] for m in fresh_strong]
+
+                # Only keep truly new tables not already in previous set
+                new_table_ids = [tid for tid in fresh_ids if tid not in previous_tables]
+
+                if new_table_ids:
+                    print(f"           ➕ New tables detected from current query : {new_table_ids}")
+                else:
+                    print(f"           └─ No new tables detected — using previous tables only")
+            except Exception as e:
+                logger.warning(f"Fresh Pinecone search for follow-up failed: {e}")
+                fresh_strong  = []
+                new_table_ids = []
+
+            # ── Fetch schemas for previous tables ─────────────────────────────
+            prev_matches = fetch_schemas_by_ids(previous_tables, [])
+            if not prev_matches:
+                return {"ok": False, "error": "⚠️ Could not retrieve previous table schemas. Please rephrase your question."}
+
+            # ── Merge previous + new table matches (deduplicated) ─────────────
+            already_fetched_ids = [m["id"] for m in prev_matches]
+            new_matches         = [m for m in fresh_strong if m["id"] in new_table_ids]
+            merged_matches      = prev_matches + new_matches
+
+            # ── Also fetch FK-related tables from the merged set ──────────────
+            related_ids   = extract_related_table_ids(merged_matches)
+            extra_matches = fetch_schemas_by_ids(related_ids, [m["id"] for m in merged_matches])
+            all_matches   = merged_matches + extra_matches
+
+            retrieved_tables = [m["id"] for m in all_matches]
+            schema_context   = build_schema_context(all_matches)
+            print(f"           └─ Final tables for LLM : {retrieved_tables}")
+
+            # ── Step 5: Generate SQL with full conversation memory ────────────
+            print(f"\n[STEP 5]   🤖 Generating SQL with Groq LLM (follow-up with memory)...")
+            llm_result = generate_sql(nl_query, schema_context, conversation_history=conversation_history)
+            if llm_result["status"] != "success":
+                return {"ok": False, "error": "⚠️ I couldn't generate a valid query for your request. Please try rephrasing your question."}
+
+            sql = llm_result["sql"]
+            print(f"           ✅ SQL generated : {sql[:100]}{'...' if len(sql) > 100 else ''}")
+
+            if is_destructive_sql(sql):
+                return {"ok": False, "error": "🚫 This assistant is read-only. Queries that delete, update, insert, or modify data are not allowed."}
+
+            return {
+                "ok": True,
+                "sql": sql,
+                "retrieved_tables": retrieved_tables,
+                "is_followup": True,
+                "query_embedding": query_embedding,
+                "cache_hit": False,
+                "cache_hit_id": None,
+                "schema_context": schema_context,
+            }
+
+        else:
+            # Follow-up detected but no previous tables found — fall through to normal Pinecone search
+            print(f"           ⚠️  Follow-up but no previous tables in history — falling back to Pinecone search")
+
+    # ── Fresh query (or follow-up with no history) — search Pinecone normally ─
     matches = search_similar(query_embedding, top_k=top_k)
     if not matches:
         return {"ok": False, "error": "⚠️ No relevant tables found for your query. Please try rephrasing your question."}
 
-    PINECONE_SIMILARITY_THRESHOLD = 0.35
     strong_matches = [m for m in matches if m["score"] >= PINECONE_SIMILARITY_THRESHOLD]
     print(f"           └─ Total matches  : {len(matches)}")
     print(f"           └─ Strong matches : {len(strong_matches)} (score >= {PINECONE_SIMILARITY_THRESHOLD})")
 
     if not strong_matches:
-        previous_tables = None
-        if conversation_history:
-            for turn in reversed(conversation_history):
-                if turn.get("retrieved_tables"):
-                    previous_tables = turn["retrieved_tables"]
-                    break
+        return {"ok": False, "error": "🗄️ I couldn't find any relevant tables for your question. Please ask about data that exists in your database."}
 
-        if previous_tables:
-            print(f"           ⚠️  Falling back to previous turn tables : {previous_tables}")
-            matches = fetch_schemas_by_ids(previous_tables, [])
-            if not matches:
-                return {"ok": False, "error": "⚠️ Could not retrieve previous table schemas. Please rephrase your question."}
-            is_followup = True
-        else:
-            best_score = matches[0]["score"]
-            return {"ok": False, "error": "🗄️ I couldn't find any relevant tables for your question. Please ask about data that exists in your database."}
-    else:
-        matches = strong_matches
+    matches = strong_matches
 
     already_fetched_ids = [m["id"] for m in matches]
-    related_ids = extract_related_table_ids(matches)
+    related_ids   = extract_related_table_ids(matches)
     extra_matches = fetch_schemas_by_ids(related_ids, already_fetched_ids)
-    all_matches = matches + extra_matches
+    all_matches   = matches + extra_matches
     retrieved_tables = [m["id"] for m in all_matches]
-    schema_context = build_schema_context(all_matches)
+    schema_context   = build_schema_context(all_matches)
     print(f"           └─ Final tables for LLM : {retrieved_tables}")
 
     # ── Step 5: Generate SQL ──────────────────────────────────────────────────
@@ -263,14 +328,6 @@ def _run_steps_1_to_5(nl_query: str, top_k: int, conversation_history: list):
     if is_destructive_sql(sql):
         return {"ok": False, "error": "🚫 This assistant is read-only. Queries that delete, update, insert, or modify data are not allowed."}
 
-    # Cache write — store ALL successful queries (follow-up or not)
-    print(f"\n[CACHE]    💾 Cache Write Check")
-    if not CACHE_ENABLED:
-        print(f"           ⏭️  SKIPPED — cache is DISABLED")
-    else:
-        stored = store_in_cache(question=nl_query, embedding=query_embedding, sql=sql)
-        print(f"           {'✅ STORED' if stored else '⏭️  SKIPPED (duplicate)'}")
-
     return {
         "ok": True,
         "sql": sql,
@@ -278,7 +335,118 @@ def _run_steps_1_to_5(nl_query: str, top_k: int, conversation_history: list):
         "is_followup": is_followup,
         "query_embedding": query_embedding,
         "cache_hit": False,
+        "cache_hit_id": None,
+        "schema_context": schema_context,
     }
+
+# =============================================================================
+# Helper: execute SQL with automatic LLM-driven retry on DB errors
+# =============================================================================
+
+def _execute_with_retry(
+    nl_query: str,
+    sql: str,
+    schema_context: str,
+    max_retries: int = MAX_SQL_RETRIES,
+    cache_hit_id: str = None,
+    query_embedding: list = None,
+    top_k: int = 10,
+) -> tuple[dict, str]:
+    RETRYABLE_CODES = {"42000", "42S02", "42S22"}
+
+    current_sql = sql
+    db_result = execute_query(current_sql)
+
+    # ── If a cached SQL immediately fails, evict the bad cache entry ──────────
+    if db_result["status"] != "success" and cache_hit_id:
+        raw_msg = db_result.get("message", "")
+        if any(code in raw_msg for code in RETRYABLE_CODES):
+            print(f"           🗑️  Evicting bad cache entry: {cache_hit_id}")
+            logger.warning(f"[CACHE] Evicting bad entry {cache_hit_id} — SQL failed on execution.")
+            try:
+                from services.redis_cache_service import get_redis_client, CACHE_KEY_PREFIX
+                get_redis_client().delete(f"{CACHE_KEY_PREFIX}{cache_hit_id}")
+            except Exception as evict_err:
+                logger.error(f"[CACHE] Failed to evict entry: {evict_err}")
+
+            # ── No schema context from cache — re-run Steps 4 & 5 fresh ──────
+            if not schema_context and query_embedding:
+                print(f"           🔄 Cache hit had no schema — re-fetching tables and regenerating SQL...")
+                logger.info("[RETRY] Re-running Steps 4+5 after bad cache eviction.")
+                try:
+                    matches = search_similar(query_embedding, top_k=top_k)
+                    PINECONE_SIMILARITY_THRESHOLD = 0.35
+                    strong_matches = [m for m in matches if m["score"] >= PINECONE_SIMILARITY_THRESHOLD]
+                    if strong_matches:
+                        already_fetched_ids = [m["id"] for m in strong_matches]
+                        related_ids = extract_related_table_ids(strong_matches)
+                        extra_matches = fetch_schemas_by_ids(related_ids, already_fetched_ids)
+                        all_matches = strong_matches + extra_matches
+                        schema_context = build_schema_context(all_matches)
+                        print(f"           ✅ Schema re-fetched for tables: {[m['id'] for m in all_matches]}")
+
+                        llm_result = generate_sql(nl_query, schema_context)
+                        if llm_result["status"] == "success" and not is_destructive_sql(llm_result["sql"]):
+                            current_sql = llm_result["sql"]
+                            print(f"           ✅ Fresh SQL generated : {current_sql[:100]}{'...' if len(current_sql) > 100 else ''}")
+                            db_result = execute_query(current_sql)
+                            if db_result["status"] == "success":
+                                print(f"           ✅ Fresh SQL executed successfully!")
+                                logger.info("[RETRY] Fresh SQL after cache eviction succeeded.")
+                                return db_result, current_sql
+                        else:
+                            logger.warning("[RETRY] Fresh SQL generation failed after cache eviction.")
+                except Exception as regen_err:
+                    logger.error(f"[RETRY] Re-fetch after cache eviction failed: {regen_err}")
+
+    for attempt in range(1, max_retries + 1):
+        if db_result["status"] == "success":
+            break
+
+        raw_msg = db_result.get("message", "")
+        is_retryable = any(code in raw_msg for code in RETRYABLE_CODES)
+
+        if not is_retryable:
+            logger.info(f"[RETRY] Non-retryable DB error, skipping LLM retry: {raw_msg[:120]}")
+            break
+
+        if not schema_context:
+            logger.info("[RETRY] Schema context unavailable, skipping retry.")
+            break
+
+        print(f"\n[STEP 6.{attempt}] 🔁 DB error detected — asking LLM to self-correct (retry {attempt}/{max_retries})...")
+        logger.warning(f"[RETRY {attempt}] SQL error: {raw_msg[:200]}")
+
+        retry_result = generate_sql_retry(
+            nl_query=nl_query,
+            schema_context=schema_context,
+            failed_sql=current_sql,
+            error_message=raw_msg,
+            attempt=attempt,
+        )
+
+        if retry_result["status"] != "success":
+            logger.error(f"[RETRY {attempt}] LLM could not produce a fix, giving up.")
+            break
+
+        corrected_sql = retry_result["sql"]
+
+        if is_destructive_sql(corrected_sql):
+            logger.error(f"[RETRY {attempt}] Corrected SQL is destructive — aborting.")
+            db_result = {"status": "error", "message": "🚫 Retry produced a destructive query — aborted."}
+            break
+
+        current_sql = corrected_sql
+        print(f"           🗄️  Executing corrected SQL (attempt {attempt})...")
+        db_result = execute_query(current_sql)
+
+        if db_result["status"] == "success":
+            print(f"           ✅ Retry {attempt} succeeded!")
+            logger.info(f"[RETRY {attempt}] SQL execution succeeded after self-correction.")
+        else:
+            logger.warning(f"[RETRY {attempt}] Still failing: {db_result.get('message', '')[:120]}")
+
+    return db_result, current_sql
 
 
 # =============================================================================
@@ -300,10 +468,16 @@ def run_pipeline(nl_query: str, top_k: int = 10, conversation_history: list = No
         sql              = prep["sql"]
         retrieved_tables = prep["retrieved_tables"]
         is_followup      = prep["is_followup"]
+        schema_context   = prep.get("schema_context", "")
 
-        # ── Step 6: Execute SQL ───────────────────────────────────────────────
+        # ── Step 6: Execute SQL (with automatic retry on SQL errors) ──────────
         print(f"\n[STEP 6]   🗄️  Executing SQL on database...")
-        db_result = execute_query(sql)
+        db_result, sql = _execute_with_retry(
+            nl_query, sql, schema_context,
+            cache_hit_id=prep.get("cache_hit_id"),
+            query_embedding=prep.get("query_embedding"),
+        )
+
         if db_result["status"] != "success":
             raw_msg = db_result.get("message", "")
             print(f"           ❌ DB execution FAILED : {raw_msg}")
@@ -318,6 +492,18 @@ def run_pipeline(nl_query: str, top_k: int = 10, conversation_history: list = No
         display_rows = all_rows[:10]
         total_rows   = len(all_rows)
         print(f"           ✅ Executed — {total_rows} row(s) returned, {len(columns)} column(s)")
+
+        # ── Cache write AFTER confirmed DB success ────────────────────────────
+        print(f"\n[CACHE]    💾 Cache Write Check")
+        if not CACHE_ENABLED or prep.get("cache_hit"):
+            print(f"           ⏭️  SKIPPED")
+        else:
+            stored = store_in_cache(
+                question=nl_query,
+                embedding=prep["query_embedding"],
+                sql=sql,
+            )
+            print(f"           {'✅ STORED' if stored else '⏭️  SKIPPED (duplicate)'}")
 
         # ── Step 7: Generate summary ──────────────────────────────────────────
         print(f"\n[STEP 7]   📝 Generating summary...")
@@ -358,21 +544,11 @@ def run_pipeline(nl_query: str, top_k: int = 10, conversation_history: list = No
         print("="*60 + "\n")
         return {"status": "error", "message": "⚠️ Something went wrong while processing your request. Please try again."}
 
-
 # =============================================================================
 # NEW: Streaming pipeline — Steps 6 & 7 run in parallel via SSE
 # =============================================================================
 
 async def run_pipeline_streaming(nl_query: str, top_k: int = 10, conversation_history: list = None):
-    """
-    Async generator that yields SSE-formatted strings.
-
-    Event sequence:
-      data: {"event":"result",  "data":{...db fields...}}   ← emitted right after DB finishes
-      data: {"event":"summary", "data":{"summary":"..."}}   ← emitted when LLM summary is ready
-      data: {"event":"done",    "data":{}}
-      data: {"event":"error",   "data":{"message":"..."}}   ← on any failure
-    """
     import json
 
     def _emit(event: str, data: dict) -> str:
@@ -391,7 +567,7 @@ async def run_pipeline_streaming(nl_query: str, top_k: int = 10, conversation_hi
         loop = asyncio.get_event_loop()
         executor = ThreadPoolExecutor(max_workers=2)
 
-        # ── Steps 1-5: run in a thread so we don't block the event loop ──────
+        # ── Steps 1-5 ─────────────────────────────────────────────────────────
         prep = await loop.run_in_executor(
             executor, _run_steps_1_to_5, nl_query, top_k, conversation_history
         )
@@ -404,10 +580,18 @@ async def run_pipeline_streaming(nl_query: str, top_k: int = 10, conversation_hi
         sql              = prep["sql"]
         retrieved_tables = prep["retrieved_tables"]
         is_followup      = prep["is_followup"]
+        schema_context   = prep.get("schema_context", "")
 
-        # ── Step 6: Execute SQL ───────────────────────────────────────────────
+        # ── Step 6: Execute SQL (with automatic retry on SQL errors) ──────────
         print(f"\n[STEP 6]   🗄️  Executing SQL on database...")
-        db_result = await loop.run_in_executor(executor, execute_query, sql)
+        db_result, sql = await loop.run_in_executor(
+            executor,
+            lambda: _execute_with_retry(
+                nl_query, sql, schema_context,
+                cache_hit_id=prep.get("cache_hit_id"),
+                query_embedding=prep.get("query_embedding"),
+            )
+        )
 
         if db_result["status"] != "success":
             raw_msg = db_result.get("message", "")
@@ -427,16 +611,24 @@ async def run_pipeline_streaming(nl_query: str, top_k: int = 10, conversation_hi
         total_rows   = len(all_rows)
         print(f"           ✅ Executed — {total_rows} row(s) returned, {len(columns)} column(s)")
 
-        # ── Step 7: Kick off summary generation IN THE BACKGROUND ────────────
-        # We start the summary task NOW (passing in the rows we just got),
-        # then IMMEDIATELY yield the DB result to the frontend so it can
-        # render the table without waiting for the LLM.
+        # ── Cache write AFTER confirmed DB success ────────────────────────────
+        print(f"\n[CACHE]    💾 Cache Write Check")
+        if not CACHE_ENABLED or prep.get("cache_hit"):
+            print(f"           ⏭️  SKIPPED")
+        else:
+            stored = store_in_cache(
+                question=nl_query,
+                embedding=prep["query_embedding"],
+                sql=sql,
+            )
+            print(f"           {'✅ STORED' if stored else '⏭️  SKIPPED (duplicate)'}")
+
+        # ── Step 7: Summary in background ─────────────────────────────────────
         print(f"\n[STEP 7]   📝 Generating summary in background...")
         summary_future = loop.run_in_executor(
             executor, generate_summary, nl_query, sql, columns, display_rows
         )
 
-        # ── Yield DB result right away ────────────────────────────────────────
         csv_path = None
         if total_rows > 10:
             safe_name = "".join(c if c.isalnum() else "_" for c in nl_query[:30])
@@ -455,7 +647,6 @@ async def run_pipeline_streaming(nl_query: str, top_k: int = 10, conversation_hi
             "csv_path": csv_path,
         })
 
-        # ── Now wait for summary and yield it separately ───────────────────────
         summary_result = await summary_future
         summary = (
             summary_result.get("summary", "Query executed successfully.")

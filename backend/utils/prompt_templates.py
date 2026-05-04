@@ -212,3 +212,44 @@ Examples of FOLLOW_UP queries:
 - Previous showed orders → "filter those by last week" = FOLLOW_UP
 
 Respond with exactly one word: FOLLOW_UP or FRESH"""
+
+
+# =============================================================================
+# SQL_RETRY_PROMPT — used when SQL execution fails and we want the LLM to
+# self-correct based on the exact database error message.
+# =============================================================================
+SQL_RETRY_PROMPT = """You are an expert T-SQL developer for Microsoft SQL Server.
+
+The following SQL query was generated but FAILED when executed against the database.
+
+--- Original Natural Language Question ---
+{nl_query}
+
+--- Database Schema Context ---
+{schema_context}
+
+--- Failed SQL Query (Attempt {attempt}) ---
+{failed_sql}
+
+--- SQL Server Error Message ---
+{error_message}
+
+--- Your Task ---
+Carefully read the error message and fix the SQL query.
+
+Common fixes to apply:
+- If the error says "Invalid column name 'X'" → that column does not exist; check the schema and use the correct column name.
+- If the error says "multi-part identifier could not be bound" → the table alias or column reference is wrong; fix the JOIN or alias.
+- If the error says "Invalid object name 'X'" → that table does not exist; use the correct table name from the schema.
+- If the error says "ambiguous column name" → qualify the column with its table name/alias.
+- If a column is truncated or incomplete (e.g. ends with just 'A') → the SQL was likely cut off; rewrite it in full.
+
+Rules:
+- Return ONLY the corrected SQL query, no explanations, no markdown, no code blocks.
+- Use ONLY the tables and columns listed in the schema context above.
+- If you cannot fix the query based on the schema, reply with exactly: CANNOT_GENERATE
+- Never use DROP, DELETE, TRUNCATE, ALTER, INSERT, UPDATE or any destructive statements.
+- Always qualify column names with table names/aliases to avoid ambiguity.
+- Use simple aliases only (T1, T2, A1, B1, etc.).
+
+Return only the corrected SQL query:"""
