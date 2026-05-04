@@ -1,23 +1,20 @@
-import { useState } from "react";
+// frontend/src/App.jsx  (REPLACE your existing App.jsx)
+import { useState, useEffect } from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
-import { useHistory } from "./hooks/useHistory";
-import Sidebar from "./components/Sidebar";
-import ChatPage from "./pages/ChatPage";
-import HistoryPage from "./pages/HistoryPage";
-import QueryPage from "./pages/QueryPage";
-import LoginPage from "./pages/LoginPage";
-import SignupPage from "./pages/SignupPage";
+import { useConversations } from "./hooks/useConversations";
+import Sidebar      from "./components/Sidebar";
+import ChatPage     from "./pages/ChatPage";
+import QueryPage    from "./pages/QueryPage";
+import LoginPage    from "./pages/LoginPage";
+import SignupPage   from "./pages/SignupPage";
 
-// ── Protected Route wrapper ──────────────────────────────────────────────────
 function PrivateRoute({ user, children }) {
   if (!user) return <Navigate to="/login" replace />;
   return children;
 }
 
 export default function App() {
-  const { history, addEntry, updateEntry, clearHistory, deleteEntry, getMemoryWindow } = useHistory();
-
-  // Auth state — persisted in sessionStorage so a page refresh keeps you logged in
+  // ── Auth state ─────────────────────────────────────────────────────────────
   const [user, setUser] = useState(() => {
     try {
       const stored = sessionStorage.getItem("nl2sql_user");
@@ -35,37 +32,59 @@ export default function App() {
   const handleLogout = () => {
     setUser(null);
     sessionStorage.removeItem("nl2sql_user");
-    clearHistory();
   };
+
+  // ── Conversations state ────────────────────────────────────────────────────
+  const {
+    conversations,
+    activeConversationId,
+    messages,
+    loadingConvs,
+    loadingMsgs,
+    loadConversations,
+    startNewChat,
+    switchToConversation,
+    addPlaceholderMessage,
+    updateMessage,
+    refreshConversationTitle,
+    removeConversation,
+    getMemoryWindow,
+  } = useConversations(user);
+
+  // Load conversations once after login
+  useEffect(() => {
+    if (user) loadConversations();
+  }, [user]);
 
   return (
     <BrowserRouter>
       <Routes>
-        {/* ── Public auth routes ─────────────────────────────────────────── */}
+
+        {/* ── Public routes ──────────────────────────────────────── */}
         <Route
           path="/login"
-          element={
-            user ? <Navigate to="/" replace /> : <LoginPage onLogin={handleLogin} />
-          }
+          element={user ? <Navigate to="/" replace /> : <LoginPage onLogin={handleLogin} />}
         />
         <Route
           path="/signup"
-          element={
-            user ? <Navigate to="/" replace /> : <SignupPage onLogin={handleLogin} />
-          }
+          element={user ? <Navigate to="/" replace /> : <SignupPage onLogin={handleLogin} />}
         />
 
-        {/* ── Protected app routes ───────────────────────────────────────── */}
+        {/* ── Protected routes ───────────────────────────────────── */}
         <Route
           path="/*"
           element={
             <PrivateRoute user={user}>
               <div className="layout">
                 <Sidebar
-                  historyCount={history.length}
-                  onClearHistory={clearHistory}
                   user={user}
                   onLogout={handleLogout}
+                  conversations={conversations}
+                  activeConversationId={activeConversationId}
+                  onNewChat={startNewChat}
+                  onSelectConversation={switchToConversation}
+                  onDeleteConversation={removeConversation}
+                  loadingConvs={loadingConvs}
                 />
                 <main className="main">
                   <Routes>
@@ -73,33 +92,18 @@ export default function App() {
                       path="/"
                       element={
                         <ChatPage
-                          history={history}
-                          addEntry={addEntry}
-                          updateEntry={updateEntry}
+                          activeConversationId={activeConversationId}
+                          messages={messages}
+                          loadingMsgs={loadingMsgs}
+                          addPlaceholderMessage={addPlaceholderMessage}
+                          updateMessage={updateMessage}
+                          refreshConversationTitle={refreshConversationTitle}
                           getMemoryWindow={getMemoryWindow}
+                          onNewChat={startNewChat}
                         />
                       }
                     />
-                    <Route
-                      path="/history"
-                      element={
-                        <HistoryPage
-                          history={history}
-                          deleteEntry={deleteEntry}
-                          clearHistory={clearHistory}
-                        />
-                      }
-                    />
-                    <Route
-                      path="/query"
-                      element={
-                        <QueryPage
-                          addEntry={addEntry}
-                          getMemoryWindow={getMemoryWindow}
-                        />
-                      }
-                    />
-                    {/* Fallback */}
+                    <Route path="/query" element={<QueryPage />} />
                     <Route path="*" element={<Navigate to="/" replace />} />
                   </Routes>
                 </main>

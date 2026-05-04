@@ -1,95 +1,138 @@
+// frontend/src/pages/ChatPage.jsx  (REPLACE your existing ChatPage.jsx)
 import { useState, useRef, useEffect } from "react";
-import { sendQueryStreaming, getFollowupQuestions } from "../services/apiClient";
+import { useNavigate } from "react-router-dom";
+import { sendQueryStreaming, getFollowupQuestions, saveMessage } from "../services/apiClient";
 import SqlDisplay from "../components/SqlDisplay";
 import ResultsTable from "../components/ResultsTable";
 
-export default function ChatPage({ history, addEntry, updateEntry, getMemoryWindow }) {
-  const [input, setInput] = useState("");
-  const [loading, setLoading] = useState(false);
+export default function ChatPage({
+  activeConversationId,
+  messages,
+  loadingMsgs,
+  addPlaceholderMessage,
+  updateMessage,
+  refreshConversationTitle,
+  getMemoryWindow,
+  onNewChat,
+}) {
+  const [input, setInput]         = useState("");
+  const [loading, setLoading]     = useState(false);
   const [followupMap, setFollowupMap] = useState({});
   const bottomRef = useRef(null);
+  const navigate  = useNavigate();
 
+  // ── Auto-scroll ───────────────────────────────────────────────────────────
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [history, loading]);
+  }, [messages, loading]);
 
-  // ── Fetch follow-up suggestions when the last entry changes ───────────────
+  // ── Reset followup map when switching conversations ───────────────────────
   useEffect(() => {
-    if (!history.length) return;
-    const lastEntry = history[history.length - 1];
+    setFollowupMap({});
+  }, [activeConversationId]);
 
-    if (
-      lastEntry.status !== "success" ||
-      !lastEntry.summary ||           // wait until summary has arrived
-      followupMap[lastEntry.id] !== undefined
-    ) return;
+  // ── Fetch follow-up suggestions for the latest message ───────────────────
+  useEffect(() => {
+    if (!messages.length) return;
+    const lastMsg = messages[messages.length - 1];
+    const localId = lastMsg.localId || lastMsg.id;
 
-    setFollowupMap((prev) => ({ ...prev, [lastEntry.id]: "loading" }));
+    const isSuccess = lastMsg.status === "success" || lastMsg.status === undefined;
+    if (!isSuccess || !lastMsg.summary || followupMap[localId] !== undefined) return;
 
+    setFollowupMap((prev) => ({ ...prev, [localId]: "loading" }));
     getFollowupQuestions({
-      nl_query: lastEntry.nl_query,
-      retrieved_tables: lastEntry.retrieved_tables || [],
-      summary: lastEntry.summary || "",
-      columns: lastEntry.columns || [],
+      nl_query:         lastMsg.nl_query,
+      retrieved_tables: lastMsg.retrieved_tables || [],
+      summary:          lastMsg.summary || "",
+      columns:          lastMsg.columns || [],
     }).then((data) => {
-      setFollowupMap((prev) => ({
-        ...prev,
-        [lastEntry.id]: data.questions || [],
-      }));
+      setFollowupMap((prev) => ({ ...prev, [localId]: data.questions || [] }));
     });
-  }, [history]);
+  }, [messages]);
 
-  const handleSend = (queryText) => {
+  // ── Create a new chat if none is active, then send ───────────────────────
+  const ensureConversation = async () => {
+    if (activeConversationId) return activeConversationId;
+    // No active conversation — create one
+    const newId = await onNewChat();
+    return newId;
+  };
+
+  // ── Main send handler ─────────────────────────────────────────────────────
+  const handleSend = async (queryText) => {
     const query = (queryText || input).trim();
     if (!query || loading) return;
     setInput("");
     setLoading(true);
 
-    const timestamp = new Date().toTimeString().slice(0, 8);
-    const memoryWindow = getMemoryWindow();
-    const memoryCount = memoryWindow.length;
+    // Ensure we have a conversation to write to
+    const convId = await ensureConversation();
+    if (!convId) {
+      setLoading(false);
+      return;
+    }
 
-    // Create a placeholder entry immediately so the user sees their question
-    const entryId = `entry-${Date.now()}`;
-    const placeholderEntry = {
-      id: entryId,
-      nl_query: query,
-      timestamp,
-      memoryCount,
-      status: "loading",  // special state: DB done, summary pending
-    };
-    addEntry(placeholderEntry);
+    const timestamp   = new Date().toTimeString().slice(0, 8);
+    const memoryWindow = getMemoryWindow();  // last 5 successful from THIS conversation
+    const memoryCount  = memoryWindow.length;
 
-    // ── Start streaming ───────────────────────────────────────────────────────
+    // Local id for React state management during streaming
+    const localId = `local-${Date.now()}`;
+
+    addPlaceholderMessage(localId, query, timestamp, memoryCount);
+
+    // Track result data so we can save it after summary arrives
+    let resultData = null;
+
     sendQueryStreaming(query, memoryWindow, {
 
-      // Called as soon as DB rows are ready — render table immediately
       onResult: (data) => {
-        updateEntry(entryId, {
+        resultData = data;
+        updateMessage(localId, {
           ...data,
-          nl_query: query,
+          nl_query:       query,
           timestamp,
           memoryCount,
-          status: "success",
-          summary: null,          // summary not yet available — show spinner
-          _summaryPending: true,  // flag so the UI can show a loading indicator
+          status:         "success",
+          summary:        null,
+          _summaryPending: true,
         });
-        // Keep setLoading(true) — input is still disabled until done
       },
 
-      // Called when LLM summary arrives — just patch summary onto the entry
-      onSummary: ({ summary }) => {
-        updateEntry(entryId, { summary, _summaryPending: false });
+      onSummary: async ({ summary }) => {
+        // Patch summary into UI
+        updateMessage(localId, { summary, _summaryPending: false });
+
+        // ── Save to DB (only on full success, never on error) ─────────────
+        if (resultData) {
+          const saveRes = await saveMessage({
+            conversationId: convId,
+            nlQuery:        query,
+            generatedSql:   resultData.sql,
+            summary:        summary,
+            retrievedTables: resultData.retrieved_tables,
+            columns:        resultData.columns,
+            rows:           resultData.rows,
+            totalRowCount:  resultData.total_row_count,
+          });
+
+          // If the backend auto-set the title (first message), update sidebar
+          if (saveRes.status === "success") {
+            // Title is updated on backend; refresh the sidebar title
+            // We derive the new title from the query (same logic as backend: first 80 chars)
+            refreshConversationTitle(convId, query.slice(0, 80));
+          }
+        }
       },
 
-      onDone: () => {
-        setLoading(false);
-      },
+      onDone: () => setLoading(false),
 
       onError: (data) => {
-        updateEntry(entryId, {
-          status: "error",
-          message: data.message,
+        // Show error in UI but do NOT save to DB
+        updateMessage(localId, {
+          status:         "error",
+          message:        data.message,
           _summaryPending: false,
         });
         setLoading(false);
@@ -101,15 +144,48 @@ export default function ChatPage({ history, addEntry, updateEntry, getMemoryWind
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); }
   };
 
-  const handleFollowupClick = (question) => {
-    handleSend(question);
-  };
+  // ── Loading state while switching conversations ───────────────────────────
+  if (loadingMsgs) {
+    return (
+      <div className="chat-page">
+        <div className="chat-messages">
+          <div className="chat-welcome">
+            <div className="chat-welcome-icon">⏳</div>
+            <p style={{ color: "#64748b" }}>Loading conversation…</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ── No active conversation selected ──────────────────────────────────────
+  if (!activeConversationId) {
+    return (
+      <div className="chat-page">
+        <div className="chat-messages">
+          <div className="chat-welcome">
+            <div className="chat-welcome-icon">🗄️</div>
+            <h2>NL2SQL Chat</h2>
+            <p>Select a chat from the sidebar or start a new one.</p>
+            <button
+              className="new-chat-btn"
+              style={{ marginTop: 20, alignSelf: "center" }}
+              onClick={() => { onNewChat(); navigate("/"); }}
+            >
+              ✏️ New Chat
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="chat-page">
       <div className="chat-messages">
 
-        {history.length === 0 && !loading && (
+        {/* ── Welcome screen when chat is empty ───────────────────── */}
+        {messages.length === 0 && !loading && (
           <div className="chat-welcome">
             <div className="chat-welcome-icon">🗄️</div>
             <h2>NL2SQL Chat</h2>
@@ -120,7 +196,7 @@ export default function ChatPage({ history, addEntry, updateEntry, getMemoryWind
                 "Show me all customers",
                 "How many orders this week?",
                 "List top 10 assets",
-                "Count journeys with harsh braking"
+                "Count journeys with harsh braking",
               ].map((ex) => (
                 <button key={ex} className="example-chip" onClick={() => setInput(ex)}>
                   {ex}
@@ -130,35 +206,35 @@ export default function ChatPage({ history, addEntry, updateEntry, getMemoryWind
           </div>
         )}
 
-        {history.map((entry, idx) => {
-          const isLast = idx === history.length - 1;
-          const followups = followupMap[entry.id];
+        {/* ── Messages ────────────────────────────────────────────── */}
+        {messages.map((entry, idx) => {
+          const localId   = entry.localId || entry.id;
+          const isLast    = idx === messages.length - 1;
+          const followups = followupMap[localId];
           const showFollowups =
             isLast &&
             !loading &&
-            entry.status === "success" &&
+            (entry.status === "success" || entry.status === undefined) &&
             !entry._summaryPending &&
             Array.isArray(followups) &&
             followups.length > 0;
 
           return (
-            <div key={entry.id} className="message-group">
+            <div key={localId} className="message-group">
 
               {/* User bubble */}
               <div className="user-row">
                 <div className="user-bubble">
                   {entry.nl_query}
                   <div className="bubble-time">
-                    {entry.timestamp}
-                    {entry.memoryCount > 0 && (
+                    {entry.timestamp || ""}
+                    {(entry.memoryCount > 0) && (
                       <span className="memory-badge">
                         🧠 {entry.memoryCount} quer{entry.memoryCount === 1 ? "y" : "ies"} in context
                       </span>
                     )}
                     {entry.memoryCount === 0 && (
-                      <span className="memory-badge memory-badge--fresh">
-                        ✨ fresh query
-                      </span>
+                      <span className="memory-badge memory-badge--fresh">✨ fresh query</span>
                     )}
                   </div>
                 </div>
@@ -170,7 +246,6 @@ export default function ChatPage({ history, addEntry, updateEntry, getMemoryWind
                 <span className="msg-avatar">🗄️</span>
                 <div className="assistant-bubble">
                   {entry.status === "loading" ? (
-                    /* Still waiting for DB result */
                     <div className="dots"><span /><span /><span /></div>
                   ) : entry.status === "error" ? (
                     <div className="msg-error">❌ {entry.message}</div>
@@ -182,29 +257,20 @@ export default function ChatPage({ history, addEntry, updateEntry, getMemoryWind
                         </div>
                       )}
                       {entry.memoryCount > 0 && !entry.is_followup && (
-                        <div className="fresh-badge">
-                          🆕 Fresh query — previous context ignored
-                        </div>
+                        <div className="fresh-badge">🆕 Fresh query — previous context ignored</div>
                       )}
 
-                      {/* ── Summary section ── */}
                       <div className="msg-summary">
                         {entry._summaryPending ? (
-                          /* DB done — summary still loading */
                           <span className="summary-loading">
-                            <span className="followup-dot" />
-                            <span className="followup-dot" />
-                            <span className="followup-dot" />
-                            <span style={{ fontSize: "0.8rem", color: "var(--color-text-secondary, #64748b)", marginLeft: "8px" }}>
-                              Generating summary…
-                            </span>
+                            <span className="followup-dot" /><span className="followup-dot" /><span className="followup-dot" />
+                            <span style={{ fontSize: "0.8rem", color: "#64748b", marginLeft: "8px" }}>Generating summary…</span>
                           </span>
                         ) : (
                           entry.summary || "Query executed successfully."
                         )}
                       </div>
 
-                      {/* ── Table always shows as soon as DB result arrives ── */}
                       <SqlDisplay sql={entry.sql} retrievedTables={entry.retrieved_tables} />
                       {entry.columns && entry.rows != null && (
                         <ResultsTable
@@ -215,7 +281,6 @@ export default function ChatPage({ history, addEntry, updateEntry, getMemoryWind
                         />
                       )}
 
-                      {/* Follow-up questions */}
                       {showFollowups && (
                         <div className="followup-questions">
                           <div className="followup-questions-label">💡 Suggested follow-ups</div>
@@ -224,7 +289,7 @@ export default function ChatPage({ history, addEntry, updateEntry, getMemoryWind
                               <button
                                 key={i}
                                 className="followup-chip"
-                                onClick={() => handleFollowupClick(q)}
+                                onClick={() => handleSend(q)}
                                 disabled={loading}
                               >
                                 {q}
@@ -234,14 +299,16 @@ export default function ChatPage({ history, addEntry, updateEntry, getMemoryWind
                         </div>
                       )}
 
-                      {isLast && !loading && followups === "loading" && entry.status === "success" && !entry._summaryPending && (
-                        <div className="followup-questions-loading">
-                          <span className="followup-dot" /><span className="followup-dot" /><span className="followup-dot" />
-                          <span style={{ fontSize: "0.75rem", color: "var(--color-text-secondary, #64748b)", marginLeft: "6px" }}>
-                            Generating follow-up suggestions...
-                          </span>
-                        </div>
-                      )}
+                      {isLast && !loading && followups === "loading" &&
+                        (entry.status === "success" || entry.status === undefined) &&
+                        !entry._summaryPending && (
+                          <div className="followup-questions-loading">
+                            <span className="followup-dot" /><span className="followup-dot" /><span className="followup-dot" />
+                            <span style={{ fontSize: "0.75rem", color: "#64748b", marginLeft: "6px" }}>
+                              Generating follow-up suggestions...
+                            </span>
+                          </div>
+                        )}
                     </>
                   )}
                 </div>
@@ -251,15 +318,13 @@ export default function ChatPage({ history, addEntry, updateEntry, getMemoryWind
           );
         })}
 
-        {/* Global thinking indicator — only shown before the first event arrives */}
-        {loading && history[history.length - 1]?.status === "loading" && (
+        {/* Global thinking indicator */}
+        {loading && messages[messages.length - 1]?.status === "loading" && (
           <div className="assistant-row" style={{ marginTop: "-12px" }}>
             <span className="msg-avatar">🗄️</span>
             <div className="assistant-bubble thinking">
               <div className="dots"><span /><span /><span /></div>
-              <span className="thinking-text">
-                Embedding → Searching → Generating SQL → Executing…
-              </span>
+              <span className="thinking-text">Embedding → Searching → Generating SQL → Executing…</span>
             </div>
           </div>
         )}
@@ -267,6 +332,7 @@ export default function ChatPage({ history, addEntry, updateEntry, getMemoryWind
         <div ref={bottomRef} />
       </div>
 
+      {/* ── Input bar ─────────────────────────────────────────────── */}
       <div className="chat-input-bar">
         <div className="input-wrapper">
           <textarea
