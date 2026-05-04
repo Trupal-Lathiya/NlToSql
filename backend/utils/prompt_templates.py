@@ -172,39 +172,43 @@ Conversation history:
 
 New question: {nl_query}
 
-A question IS a follow-up ONLY if it CANNOT be answered without knowing the previous results. This means:
-- It uses pronouns that refer to previous results: "them", "those", "it", "they", "these", "that", "their"
-  Example: "show me their emails" → FOLLOW_UP (who is "their"? depends on previous result)
+A question IS a follow-up if ANY of these are true:
+- It uses pronouns referring to previous results: "them", "those", "it", "they", "these", "that", "their"
+  Example: "show me their emails" → FOLLOW_UP
 - It says "also show", "add", "include", "as well", "too" — extending a previous query
   Example: "also show their phone number" → FOLLOW_UP
 - It asks for detail about a SPECIFIC value that only appeared in previous results
   Example: Previous showed driver "SAM Test 1" → "give me detail of SAM Test 1" → FOLLOW_UP
 - It uses "same", "above", "previous", "those results", "from those", "of those"
   Example: "filter those by active status" → FOLLOW_UP
+- It is a SHORT or VAGUE question (under 6 words) that references something
+  from the previous result — like "first one", "first name", "detail", "more info",
+  "tell me more", "expand", "show more", "what about the first", "give detail"
+  Example: Previous showed customer list → "give me first name detail" → FOLLOW_UP
+  Example: Previous showed customer list → "detail of first one" → FOLLOW_UP
+  Example: Previous showed list → "give me top 5" → FOLLOW_UP
 
 A question is FRESH (NOT a follow-up) if:
 - It is a complete, self-contained question that can be answered without any prior context
 - It just happens to be about the same topic or table as a previous query
-- It introduces any new filter, aggregation, or condition on its own — without referring to previous results
+- It introduces any new filter, aggregation, or condition entirely on its own
 - It asks a new standalone question about drivers, assets, customers, journeys, etc.
 
-CRITICAL RULE: Topical similarity is NOT enough to be a follow-up.
+CRITICAL RULE: If the question is short, vague, or incomplete on its own — and there IS
+a previous query it could be continuing — treat it as FOLLOW_UP.
 If the question makes complete sense on its own without reading any previous result → it is FRESH.
 
 Examples of FRESH queries (even after similar previous questions):
-- Previous: "give me driver list" → New: "give me the driver name who has driven their vehicle most" = FRESH
-  (This is self-contained. It doesn't need the previous result to make sense.)
+- Previous: "give me driver list" → New: "give me the driver who has driven most" = FRESH
 - Previous: "show me all drivers" → New: "how many drivers are active?" = FRESH
-  (Complete question on its own — doesn't need previous results.)
 - Previous: "show me all customers" → New: "show me all drivers" = FRESH
-- "what is the weather today" = FRESH
 
 Examples of FOLLOW_UP queries:
+- Previous: showed customer list → "give me first name detail" = FOLLOW_UP
+- Previous: showed customer list → "detail of first one" = FOLLOW_UP
+- Previous: showed customer list → "give me top 5" = FOLLOW_UP
 - Previous result showed driver "SAM Test 1" → "give me details of SAM Test 1" = FOLLOW_UP
-  (References a specific name from previous result.)
 - Previous showed a list → "show me their email addresses" = FOLLOW_UP
-  (Uses "their" — depends on previous result to know who.)
 - Previous showed orders → "filter those by last week" = FOLLOW_UP
-  (Uses "those" — depends on previous result.)
 
 Respond with exactly one word: FOLLOW_UP or FRESH"""
