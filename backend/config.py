@@ -46,3 +46,11 @@ CACHE_TTL_ENABLED = os.getenv("CACHE_TTL_ENABLED", "true").lower() == "true"
 CACHE_LRU_ENABLED = os.getenv("CACHE_LRU_ENABLED", "false").lower() == "true"
 CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", "3600"))
 SIMILARITY_THRESHOLD = float(os.getenv("SIMILARITY_THRESHOLD", "0.90"))
+
+# Add this line to your existing backend/config.py
+# (place it with the other os.getenv lines)
+ 
+# ── Auth ──────────────────────────────────────────────────────────────────────
+# CHECK_PASSWORD=true  → verify password against AspNetUsers.PasswordHash
+# CHECK_PASSWORD=false → skip password check (only confirm username exists in DB)
+CHECK_PASSWORD = os.getenv("CHECK_PASSWORD", "false").lower() == "true"

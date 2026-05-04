@@ -1,5 +1,45 @@
 const BASE_URL = process.env.REACT_APP_API_URL || "http://127.0.0.1:8000";
 
+// ── Auth helpers ─────────────────────────────────────────────────────────────
+
+/**
+ * Register a new user.
+ * Returns { status: "success", user: { username, email } }
+ *      or { status: "error",   message: "..." }
+ */
+export async function signup(username, email, password) {
+  try {
+    const res = await fetch(`${BASE_URL}/auth/signup`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, email, password }),
+    });
+    return await res.json();
+  } catch (err) {
+    return { status: "error", message: "Cannot connect to backend. Is the server running?" };
+  }
+}
+
+/**
+ * Authenticate an existing user.
+ * Returns { status: "success", user: { username, email } }
+ *      or { status: "error",   message: "..." }
+ */
+export async function login(username, password) {
+  try {
+    const res = await fetch(`${BASE_URL}/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    });
+    return await res.json();
+  } catch (err) {
+    return { status: "error", message: "Cannot connect to backend. Is the server running?" };
+  }
+}
+
+// ── Existing query helpers (unchanged) ───────────────────────────────────────
+
 /**
  * Original blocking query — kept for QueryPage (non-streaming).
  */
@@ -44,20 +84,6 @@ export async function sendQuery(naturalLanguageQuery, memoryWindow = []) {
 
 /**
  * Streaming query — used by ChatPage.
- *
- * Calls /query/stream and reads Server-Sent Events progressively.
- * Invokes callbacks as each event arrives:
- *
- *   onResult(data)  — called immediately when DB rows are ready
- *                     data = { status, sql, columns, rows, ... }
- *
- *   onSummary(data) — called when the LLM summary is ready
- *                     data = { summary: "..." }
- *
- *   onError(data)   — called on any pipeline error
- *                     data = { message: "..." }
- *
- * Returns a cleanup function — call it to abort the stream early.
  */
 export function sendQueryStreaming(naturalLanguageQuery, memoryWindow = [], { onResult, onSummary, onError, onDone } = {}) {
   const controller = new AbortController();
@@ -99,10 +125,7 @@ export function sendQueryStreaming(naturalLanguageQuery, memoryWindow = [], { on
         if (done) break;
 
         buffer += decoder.decode(value, { stream: true });
-
-        // SSE lines are separated by \n\n
         const parts = buffer.split("\n\n");
-        // Last element may be incomplete — keep it in buffer
         buffer = parts.pop();
 
         for (const part of parts) {
@@ -123,7 +146,7 @@ export function sendQueryStreaming(naturalLanguageQuery, memoryWindow = [], { on
         }
       }
     } catch (err) {
-      if (err.name === "AbortError") return; // intentional cancel
+      if (err.name === "AbortError") return;
       if (err.name === "TypeError" && err.message.includes("fetch")) {
         onError?.({ message: "Cannot connect to backend. Is the server running?" });
         return;
@@ -132,7 +155,6 @@ export function sendQueryStreaming(naturalLanguageQuery, memoryWindow = [], { on
     }
   })();
 
-  // Return abort function so the caller can cancel if needed
   return () => controller.abort();
 }
 
