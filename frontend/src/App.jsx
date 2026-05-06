@@ -24,16 +24,6 @@ export default function App() {
     }
   });
 
-  const handleLogin = (userData) => {
-    setUser(userData);
-    sessionStorage.setItem("nl2sql_user", JSON.stringify(userData));
-  };
-
-  const handleLogout = () => {
-    setUser(null);
-    sessionStorage.removeItem("nl2sql_user");
-  };
-
   // ── Conversations state ────────────────────────────────────────────────────
   const {
     conversations,
@@ -49,11 +39,34 @@ export default function App() {
     refreshConversationTitle,
     removeConversation,
     getMemoryWindow,
+    resetConversations,   // ← used on logout to wipe the previous user's data
   } = useConversations(user);
 
-  // Load conversations once after login
+  // ── Login handler ─────────────────────────────────────────────────────────
+  // Reset any leftover conversation state from the previous session FIRST,
+  // then set the new user so loadConversations fires for the correct userId.
+  const handleLogin = (userData) => {
+    resetConversations();                                         // wipe old user's data
+    setUser(userData);
+    sessionStorage.setItem("nl2sql_user", JSON.stringify(userData));
+  };
+
+  // ── Logout handler ────────────────────────────────────────────────────────
+  // Wipe conversation/message state immediately so nothing leaks to the
+  // login screen or the next user that logs in on this browser tab.
+  const handleLogout = () => {
+    resetConversations();                                         // clear sidebar + messages
+    setUser(null);
+    sessionStorage.removeItem("nl2sql_user");
+  };
+
+  // ── Load conversations whenever the logged-in user changes ────────────────
+  // This runs after login (user goes from null → userData) and is a no-op
+  // after logout (user is null → loadConversations guards on user?.id).
   useEffect(() => {
-    if (user) loadConversations();
+    if (user) {
+      loadConversations();
+    }
   }, [user]);
 
   return (
@@ -92,7 +105,7 @@ export default function App() {
                       path="/"
                       element={
                         <ChatPage
-                          user={user}                        {/* ← tenant context */}
+                          user={user}
                           activeConversationId={activeConversationId}
                           messages={messages}
                           loadingMsgs={loadingMsgs}

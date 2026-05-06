@@ -29,7 +29,6 @@ MAX_SQL_RETRIES = 2
 _classifier_client = Groq(api_key=GROQ_API_KEY)
 
 # ── Column names that carry tenant identity ───────────────────────────────────
-# Lower-cased so matching is case-insensitive.
 _USER_ID_COLUMNS     = {"userid"}
 _CUSTOMER_ID_COLUMNS = {"customerid"}
 
@@ -56,14 +55,13 @@ def _inject_tenant_filter(sql: str, schema_context: str, user_id: str, customer_
         return sql  # no tenant context → nothing to do
 
     # ── 1. Build a map: table_name_lower → set of tenant column names ────────
-    tenant_cols: dict[str, set] = {}
+    tenant_cols: dict = {}
     current_table = None
     for line in schema_context.splitlines():
         line = line.strip()
         if line.startswith("Table:"):
             current_table = line.split("Table:")[-1].strip()
         elif current_table and line.startswith("-"):
-            # e.g.  "- UserId: varchar (nullable)"
             col_part = line.lstrip("- ").split(":")[0].strip()
             col_lower = col_part.lower()
             if col_lower in _USER_ID_COLUMNS or col_lower in _CUSTOMER_ID_COLUMNS:
@@ -73,7 +71,6 @@ def _inject_tenant_filter(sql: str, schema_context: str, user_id: str, customer_
         return sql  # no tables in the schema have tenant columns
 
     # ── 2. Find tables actually used in this SQL ─────────────────────────────
-    # Match table names after FROM / JOIN (handles aliases like "FROM Foo T1").
     table_pattern = re.compile(
         r'\b(?:FROM|JOIN)\s+([A-Za-z_][A-Za-z0-9_]*)',
         re.IGNORECASE
@@ -118,16 +115,9 @@ def _inject_tenant_filter(sql: str, schema_context: str, user_id: str, customer_
     extra_where = " AND ".join(missing_conditions)
 
     # ── 5. Inject: append to existing WHERE or add new one ───────────────────
-    # Strategy: find the last WHERE clause and append, or find ORDER BY / GROUP BY
-    # / HAVING and insert before it, or append at the very end.
-
-    # Remove trailing semicolon for safe manipulation
     sql_stripped = sql.rstrip().rstrip(";")
 
     if re.search(r'\bWHERE\b', sql_stripped, re.IGNORECASE):
-        # Append to existing WHERE.
-        # Insert before the first ORDER BY / GROUP BY / HAVING at top level,
-        # or at the end if none found.
         injection_point = re.search(
             r'\b(ORDER\s+BY|GROUP\s+BY|HAVING)\b', sql_stripped, re.IGNORECASE
         )
@@ -141,7 +131,6 @@ def _inject_tenant_filter(sql: str, schema_context: str, user_id: str, customer_
         else:
             sql_stripped = sql_stripped + f"\n  AND {extra_where}"
     else:
-        # No WHERE clause yet — add one before ORDER BY / GROUP BY / HAVING.
         injection_point = re.search(
             r'\b(ORDER\s+BY|GROUP\s+BY|HAVING)\b', sql_stripped, re.IGNORECASE
         )
@@ -216,7 +205,7 @@ def is_destructive_sql(sql: str) -> bool:
     return any(re.search(pattern, sql_upper) for pattern in BLOCKED_SQL_KEYWORDS)
 
 
-def extract_related_table_ids(matches: list[dict]) -> list[str]:
+def extract_related_table_ids(matches: list) -> list:
     related = set()
     for match in matches:
         text = match["metadata"].get("text", "")
@@ -234,7 +223,7 @@ def extract_related_table_ids(matches: list[dict]) -> list[str]:
     return list(related)
 
 
-def fetch_schemas_by_ids(table_ids: list[str], already_fetched_ids: list[str]) -> list[dict]:
+def fetch_schemas_by_ids(table_ids: list, already_fetched_ids: list) -> list:
     from services.pinecone_service import get_index
 
     missing = [t for t in table_ids if t not in already_fetched_ids]
@@ -266,7 +255,7 @@ def fetch_schemas_by_ids(table_ids: list[str], already_fetched_ids: list[str]) -
     return extra
 
 
-def build_schema_context(matches: list[dict]) -> str:
+def build_schema_context(matches: list) -> str:
     context_parts = []
     for match in matches:
         text = match["metadata"].get("text", "")
@@ -287,7 +276,7 @@ def save_csv(columns: list, rows: list, filename: str) -> str:
 
 
 # =============================================================================
-# Shared Steps 1-5 logic (now tenant-aware)
+# Shared Steps 1-5 logic (tenant-aware with per-user Redis cache)
 # =============================================================================
 
 def _run_steps_1_to_5(
@@ -298,8 +287,13 @@ def _run_steps_1_to_5(
     customer_id: int = None,
 ):
     """
-    Steps 1–5 of the pipeline. Now accepts user_id / customer_id and threads
-    them into SQL generation so every query is tenant-scoped.
+    Steps 1–5 of the pipeline. Threads user_id / customer_id into SQL generation
+    so every query is tenant-scoped.
+
+    Redis cache strategy:
+      - Admin (no user_id)  → uses the shared admin cache namespace
+      - Customer (user_id)  → uses their own per-user cache namespace
+      - Follow-up queries   → always bypass cache (context may have changed)
     """
     # ── Step 1 (PARALLEL): Classify + Embed ──────────────────────────────────
     print(f"\n[STEP 1]   ⚙️  Running classifier + embedding in parallel...")
@@ -313,6 +307,8 @@ def _run_steps_1_to_5(
     print(f"           ✅ Embedding       : done (dim={len(query_embedding)})")
     if user_id or customer_id is not None:
         print(f"           🔒 Tenant context  : userId={user_id!r}  customerId={customer_id}")
+    else:
+        print(f"           👑 Admin mode      : no tenant filtering")
 
     if classification == "BLOCKED_DESTRUCTIVE":
         return {"ok": False, "error": "🚫 This assistant is read-only. Queries that delete, update, insert, or modify data are not allowed."}
@@ -325,23 +321,28 @@ def _run_steps_1_to_5(
         is_followup = detect_followup(nl_query, conversation_history)
     print(f"\n[STEP 2]   🔗 Follow-up detection : {'YES' if is_followup else 'NO'}")
 
-    # ── Step 3: Redis cache (skip lookup if follow-up) ────────────────────────
+    # ── Step 3: Redis cache lookup ────────────────────────────────────────────
+    # Cache is PER-USER:
+    #   - Admin (no user_id)  → checks/writes "nl2sql:cache:admin:" namespace
+    #   - Customer (user_id)  → checks/writes "nl2sql:cache:user:<user_id>:" namespace
+    #
+    # Follow-up queries always skip cache because the LLM needs conversation
+    # context that wouldn't be stored in a cached SQL string.
     cache_hit_entry = None
     print(f"\n[STEP 3]   🗃️  Redis Cache Check")
     if not CACHE_ENABLED:
         print(f"           ⏭️  SKIPPED — cache is DISABLED")
     elif is_followup:
         print(f"           ⏭️  SKIPPED — follow-up query, context may differ")
-    elif user_id or customer_id is not None:
-        # Skip cache for authenticated users — cache entries don't carry tenant
-        # context so a hit from user A could serve data to user B.
-        print(f"           ⏭️  SKIPPED — tenant-scoped query, cache bypassed for safety")
     else:
-        cache_hit_entry = find_similar_cache(query_embedding)
+        cache_namespace = f"user:{user_id}" if user_id else "admin"
+        print(f"           🔍 Checking cache namespace: [{cache_namespace}]")
+        # Pass user_id so find_similar_cache looks in the correct namespace
+        cache_hit_entry = find_similar_cache(query_embedding, user_id=user_id)
         if cache_hit_entry:
-            print(f"           ✅ CACHE HIT — '{cache_hit_entry.get('question', '')}'")
+            print(f"           ✅ CACHE HIT  [{cache_namespace}] — '{cache_hit_entry.get('question', '')}'")
         else:
-            print(f"           ❌ CACHE MISS")
+            print(f"           ❌ CACHE MISS [{cache_namespace}]")
 
     if cache_hit_entry:
         return {
@@ -505,7 +506,7 @@ def _execute_with_retry(
     top_k: int = 10,
     user_id: str = None,
     customer_id: int = None,
-) -> tuple[dict, str]:
+) -> tuple:
     RETRYABLE_CODES = {"42000", "42S02", "42S22"}
 
     current_sql = sql
@@ -518,8 +519,9 @@ def _execute_with_retry(
             print(f"           🗑️  Evicting bad cache entry: {cache_hit_id}")
             logger.warning(f"[CACHE] Evicting bad entry {cache_hit_id} — SQL failed on execution.")
             try:
-                from services.redis_cache_service import get_redis_client, CACHE_KEY_PREFIX
-                get_redis_client().delete(f"{CACHE_KEY_PREFIX}{cache_hit_id}")
+                from services.redis_cache_service import get_redis_client, _tenant_prefix
+                prefix = _tenant_prefix(user_id)
+                get_redis_client().delete(f"{prefix}{cache_hit_id}")
             except Exception as evict_err:
                 logger.error(f"[CACHE] Failed to evict entry: {evict_err}")
 
@@ -629,6 +631,8 @@ def run_pipeline(
         print(f"   Cache      : {'ENABLED' if CACHE_ENABLED else 'DISABLED'}")
         if user_id or customer_id is not None:
             print(f"   Tenant     : userId={user_id!r}  customerId={customer_id}")
+        else:
+            print(f"   Role       : Admin (full access, no tenant filter)")
         print("="*60)
 
         prep = _run_steps_1_to_5(
@@ -668,18 +672,28 @@ def run_pipeline(
         total_rows   = len(all_rows)
         print(f"           ✅ Executed — {total_rows} row(s) returned, {len(columns)} column(s)")
 
-        # ── Cache write — only for anonymous (non-tenant) queries ─────────────
+        # ── Cache write — scoped per user ─────────────────────────────────────
+        # Admin: writes to admin cache namespace
+        # Customer: writes to their own user cache namespace
+        # Follow-ups and cache hits: skipped
         print(f"\n[CACHE]    💾 Cache Write Check")
-        if not CACHE_ENABLED or prep.get("cache_hit") or user_id or customer_id is not None:
-            reason = "DISABLED" if not CACHE_ENABLED else ("HIT" if prep.get("cache_hit") else "tenant query — not cached")
+        if not CACHE_ENABLED or prep.get("cache_hit") or is_followup:
+            if not CACHE_ENABLED:
+                reason = "DISABLED"
+            elif prep.get("cache_hit"):
+                reason = "already a cache hit"
+            else:
+                reason = "follow-up — not cached"
             print(f"           ⏭️  SKIPPED ({reason})")
         else:
+            cache_namespace = f"user:{user_id}" if user_id else "admin"
             stored = store_in_cache(
                 question=nl_query,
                 embedding=prep["query_embedding"],
                 sql=sql,
+                user_id=user_id,   # None = admin namespace, str = user namespace
             )
-            print(f"           {'✅ STORED' if stored else '⏭️  SKIPPED (duplicate)'}")
+            print(f"           {'✅ STORED' if stored else '⏭️  SKIPPED (duplicate)'} [{cache_namespace}]")
 
         # ── Step 7: Generate summary ──────────────────────────────────────────
         print(f"\n[STEP 7]   📝 Generating summary...")
@@ -747,6 +761,8 @@ async def run_pipeline_streaming(
         print(f"   Query : {nl_query}")
         if user_id or customer_id is not None:
             print(f"   Tenant: userId={user_id!r}  customerId={customer_id}")
+        else:
+            print(f"   Role  : Admin (full access, no tenant filter)")
         print("="*60)
 
         loop = asyncio.get_event_loop()
@@ -802,18 +818,25 @@ async def run_pipeline_streaming(
         total_rows   = len(all_rows)
         print(f"           ✅ Executed — {total_rows} row(s) returned, {len(columns)} column(s)")
 
-        # ── Cache write — only for anonymous queries ───────────────────────────
+        # ── Cache write — scoped per user ─────────────────────────────────────
         print(f"\n[CACHE]    💾 Cache Write Check")
-        if not CACHE_ENABLED or prep.get("cache_hit") or user_id or customer_id is not None:
-            reason = "DISABLED" if not CACHE_ENABLED else ("HIT" if prep.get("cache_hit") else "tenant query — not cached")
+        if not CACHE_ENABLED or prep.get("cache_hit") or is_followup:
+            if not CACHE_ENABLED:
+                reason = "DISABLED"
+            elif prep.get("cache_hit"):
+                reason = "already a cache hit"
+            else:
+                reason = "follow-up — not cached"
             print(f"           ⏭️  SKIPPED ({reason})")
         else:
+            cache_namespace = f"user:{user_id}" if user_id else "admin"
             stored = store_in_cache(
                 question=nl_query,
                 embedding=prep["query_embedding"],
                 sql=sql,
+                user_id=user_id,
             )
-            print(f"           {'✅ STORED' if stored else '⏭️  SKIPPED (duplicate)'}")
+            print(f"           {'✅ STORED' if stored else '⏭️  SKIPPED (duplicate)'} [{cache_namespace}]")
 
         # ── Step 7: Summary in background ─────────────────────────────────────
         print(f"\n[STEP 7]   📝 Generating summary in background...")

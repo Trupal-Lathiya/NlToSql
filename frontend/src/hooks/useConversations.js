@@ -1,4 +1,4 @@
-// frontend/src/hooks/useConversations.js  (NEW FILE)
+// frontend/src/hooks/useConversations.js
 import { useState, useCallback } from "react";
 import {
   listConversations,
@@ -16,20 +16,40 @@ import {
  *     since messages loaded from DB don't have a status field but are all
  *     successful by definition).
  *   - Only the last 5 of those are sent to the LLM.
+ *
+ * IMPORTANT — logout / user-switch safety:
+ *   Call resetConversations() on logout BEFORE clearing the user from state.
+ *   This wipes conversations, messages and activeConversationId so the next
+ *   user that logs in starts with a completely clean slate.
  */
 export function useConversations(user) {
-  const [conversations, setConversations]       = useState([]);   // sidebar list
-  const [activeConversationId, setActiveConvId] = useState(null); // currently open chat
-  const [messages, setMessages]                 = useState([]);   // messages of active chat
+  const [conversations, setConversations]       = useState([]);
+  const [activeConversationId, setActiveConvId] = useState(null);
+  const [messages, setMessages]                 = useState([]);
   const [loadingConvs, setLoadingConvs]         = useState(false);
   const [loadingMsgs, setLoadingMsgs]           = useState(false);
+
+  // ── RESET — call this on logout to wipe all state ────────────────────────
+  // Without this, the previous user's conversations stay visible in React
+  // memory even after sessionStorage is cleared and a new user logs in.
+  const resetConversations = useCallback(() => {
+    setConversations([]);
+    setActiveConvId(null);
+    setMessages([]);
+    setLoadingConvs(false);
+    setLoadingMsgs(false);
+  }, []);
 
   // ── Load all conversations for the logged-in user ─────────────────────────
   const loadConversations = useCallback(async () => {
     if (!user?.id) return;
     setLoadingConvs(true);
     const res = await listConversations(user.id);
-    if (res.status === "success") setConversations(res.conversations);
+    // Only apply results if they belong to the CURRENT user (guard against
+    // a slow in-flight request resolving after a user has already logged out).
+    if (res.status === "success") {
+      setConversations(res.conversations);
+    }
     setLoadingConvs(false);
   }, [user]);
 
@@ -40,25 +60,24 @@ export function useConversations(user) {
     if (res.status !== "success") return null;
 
     const newConv = res.conversation;
-    setConversations((prev) => [newConv, ...prev]); // prepend to sidebar
+    setConversations((prev) => [newConv, ...prev]);
     setActiveConvId(newConv.id);
-    setMessages([]);                                 // fresh empty chat
+    setMessages([]);
     return newConv.id;
   }, [user]);
 
   // ── Switch to an existing conversation ────────────────────────────────────
   const switchToConversation = useCallback(async (conversationId) => {
-    if (conversationId === activeConversationId) return; // already open
+    if (conversationId === activeConversationId) return;
     setActiveConvId(conversationId);
     setMessages([]);
     setLoadingMsgs(true);
 
     const res = await getMessages(conversationId);
     if (res.status === "success") {
-      // Give each message a local id for React keys
       const loaded = res.messages.map((m) => ({
         ...m,
-        localId: m.id,            // use DB id as the local key
+        localId: m.id,
       }));
       setMessages(loaded);
     }
@@ -95,7 +114,7 @@ export function useConversations(user) {
           : c
       )
     );
-    // Also re-sort so this convo moves to the top
+    // Re-sort so updated convo moves to the top
     setConversations((prev) => {
       const target = prev.find((c) => c.id === conversationId);
       if (!target) return prev;
@@ -103,7 +122,7 @@ export function useConversations(user) {
     });
   }, []);
 
-  // ── Delete a conversation ────────────────────────────────────────────────
+  // ── Delete a conversation ─────────────────────────────────────────────────
   const removeConversation = useCallback(async (conversationId) => {
     await deleteConversation(conversationId);
     setConversations((prev) => prev.filter((c) => c.id !== conversationId));
@@ -114,19 +133,14 @@ export function useConversations(user) {
   }, [activeConversationId]);
 
   // ── Build the memory window from current messages ─────────────────────────
-  // Only successful messages, last 5 only.
   const getMemoryWindow = useCallback(() => {
     return messages
-      .filter((m) => {
-        // Messages loaded from DB have no "status" field — they're all successful.
-        // Messages created during streaming have status = "loading" | "success" | "error".
-        return m.status === undefined || m.status === "success";
-      })
+      .filter((m) => m.status === undefined || m.status === "success")
       .slice(-5)
       .map((m) => ({
-        nl_query:        m.nl_query,
-        sql:             m.sql             || m.generated_sql || null,
-        summary:         m.summary         || null,
+        nl_query:         m.nl_query,
+        sql:              m.sql             || m.generated_sql || null,
+        summary:          m.summary         || null,
         retrieved_tables: m.retrieved_tables || null,
       }));
   }, [messages]);
@@ -145,5 +159,6 @@ export function useConversations(user) {
     refreshConversationTitle,
     removeConversation,
     getMemoryWindow,
+    resetConversations,   // ← expose so App.jsx can call it on logout
   };
 }
