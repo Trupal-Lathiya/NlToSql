@@ -1,4 +1,4 @@
-// frontend/src/services/apiClient.js  (REPLACE your existing file with this)
+// frontend/src/services/apiClient.js
 
 const BASE_URL = process.env.REACT_APP_API_URL || "http://127.0.0.1:8000";
 
@@ -32,10 +32,6 @@ export async function login(username, password) {
 
 // ── Chat / Conversation helpers ───────────────────────────────────────────────
 
-/**
- * Create a new conversation for the logged-in user.
- * Returns { status, conversation: { id, title, created_at, updated_at, message_count } }
- */
 export async function createConversation(userId) {
   try {
     const res = await fetch(`${BASE_URL}/chats`, {
@@ -49,10 +45,6 @@ export async function createConversation(userId) {
   }
 }
 
-/**
- * List all conversations for a user (newest first).
- * Returns { status, conversations: [...] }
- */
 export async function listConversations(userId) {
   try {
     const res = await fetch(`${BASE_URL}/chats/user/${userId}`);
@@ -62,10 +54,6 @@ export async function listConversations(userId) {
   }
 }
 
-/**
- * Load all messages for a conversation.
- * Returns { status, messages: [...] }
- */
 export async function getMessages(conversationId) {
   try {
     const res = await fetch(`${BASE_URL}/chats/${conversationId}/messages`);
@@ -75,10 +63,6 @@ export async function getMessages(conversationId) {
   }
 }
 
-/**
- * Save a SUCCESSFUL message to a conversation.
- * NEVER call this for error responses.
- */
 export async function saveMessage({
   conversationId,
   nlQuery,
@@ -110,9 +94,6 @@ export async function saveMessage({
   }
 }
 
-/**
- * Delete a conversation and all its messages.
- */
 export async function deleteConversation(conversationId) {
   try {
     const res = await fetch(`${BASE_URL}/chats/${conversationId}`, {
@@ -124,9 +105,26 @@ export async function deleteConversation(conversationId) {
   }
 }
 
-// ── Query helpers (unchanged) ─────────────────────────────────────────────────
+// ── Query helpers ─────────────────────────────────────────────────────────────
+//
+// Both sendQuery and sendQueryStreaming now accept an optional `user` object
+// (from sessionStorage). When present, user_id and customer_id are included
+// in the request body so the backend can scope every SQL query to the correct
+// tenant.
 
-export async function sendQuery(naturalLanguageQuery, memoryWindow = []) {
+/**
+ * Build the tenant fields to inject into a query request body.
+ * Returns { user_id, customer_id } when the user is logged in, or {} otherwise.
+ */
+function _tenantFields(user) {
+  if (!user) return {};
+  return {
+    user_id: user.id || null,
+    customer_id: user.customerId != null ? user.customerId : null,
+  };
+}
+
+export async function sendQuery(naturalLanguageQuery, memoryWindow = [], user = null) {
   try {
     const conversationHistory = memoryWindow.map((e) => ({
       nl_query: e.nl_query,
@@ -141,6 +139,7 @@ export async function sendQuery(naturalLanguageQuery, memoryWindow = []) {
       body: JSON.stringify({
         natural_language_query: naturalLanguageQuery,
         conversation_history: conversationHistory,
+        ..._tenantFields(user),
       }),
       signal: AbortSignal.timeout(300000),
     });
@@ -161,7 +160,8 @@ export async function sendQuery(naturalLanguageQuery, memoryWindow = []) {
 export function sendQueryStreaming(
   naturalLanguageQuery,
   memoryWindow = [],
-  { onResult, onSummary, onError, onDone } = {}
+  { onResult, onSummary, onError, onDone } = {},
+  user = null
 ) {
   const controller = new AbortController();
 
@@ -180,6 +180,7 @@ export function sendQueryStreaming(
         body: JSON.stringify({
           natural_language_query: naturalLanguageQuery,
           conversation_history: conversationHistory,
+          ..._tenantFields(user),
         }),
         signal: controller.signal,
       });

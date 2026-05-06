@@ -1,16 +1,6 @@
 # =============================================================================
 # utils/prompt_templates.py - LLM Prompt Templates
 # =============================================================================
-# This file stores all prompt templates used when communicating with the
-# Groq LLM. Keeping prompts separate from logic allows easy tuning:
-#   - SYSTEM_PROMPT: Sets the LLM's role as a T-SQL expert that generates
-#     valid SQL Server queries.
-#   - SQL_GENERATION_PROMPT: Template that combines the user's NL query
-#     with retrieved table schemas, instructing the LLM to produce a
-#     correct SQL query.
-#   - FEW_SHOT_EXAMPLES: (Optional) Example NL-to-SQL pairs to improve
-#     the quality of generated queries via in-context learning.
-# =============================================================================
 
 FOLLOWUP_QUESTIONS_PROMPT = """You are a smart database assistant. Based on a user's previous database query and its results, generate exactly 3 short, natural follow-up questions the user might want to ask next.
  
@@ -31,7 +21,6 @@ Example output format:
 ["Which driver has the most journeys?", "Show journeys longer than 2 hours", "How many journeys had harsh braking?"]
  
 Now generate 3 follow-up questions:"""
-
 
 
 SYSTEM_PROMPT = """You are an expert T-SQL developer for Microsoft SQL Server.
@@ -59,7 +48,54 @@ Rules:
 """
 
 
+# ── Multitenancy system prompt extension ─────────────────────────────────────
+# This is appended to SYSTEM_PROMPT when a user_id / customer_id is present.
+# The LLM is instructed to add the correct tenant filter to every query.
 
+TENANT_PROMPT_EXTENSION = """
+IMPORTANT — MULTITENANCY / DATA ISOLATION RULES:
+You are generating a query for a specific authenticated user. You MUST scope every
+query to that user's data by adding appropriate WHERE conditions.
+
+Tenant context:
+  UserId    = '{user_id}'
+  CustomerId = {customer_id}
+
+Rules for tenant filtering:
+1. For EVERY table you query, inspect its columns (from the schema context above).
+   - If the table has a column named exactly 'UserId'     → add: TableAlias.UserId = '{user_id}'
+   - If the table has a column named exactly 'CustomerId' → add: TableAlias.CustomerId = {customer_id}
+   - If the table has BOTH, add BOTH conditions joined with AND.
+   - If the table has NEITHER, do NOT add a filter (the table is a lookup/reference table).
+
+2. Apply these filters in the WHERE clause (or JOIN ON clause when appropriate).
+   Do NOT use subqueries or CTEs just to apply the filter — add it directly.
+
+3. NEVER expose data belonging to other users or customers. This is a hard security
+   requirement. Omitting the tenant filter is NOT acceptable under any circumstances.
+
+4. The tenant filter applies to the *driving* tables in the query (the main entity
+   tables). Reference/lookup tables (e.g. FuelTypes, AlertTypes, ImageLookup,
+   RouteStatus, SystemUserStatus, Zones, MapType, AssetReminderType,
+   SAMSystemModules, SAMSystemPermissions, StandardReportTemplate,
+   SubscriptionType, SystemNotificationTypes) do NOT have UserId/CustomerId
+   and do NOT need a tenant filter — join them freely.
+"""
+
+
+def build_system_prompt(user_id: str = None, customer_id: int = None) -> str:
+    """
+    Returns the full system prompt.
+    When tenant credentials are provided, appends the multitenancy rules
+    so the LLM always scopes every generated query to the correct tenant.
+    """
+    prompt = SYSTEM_PROMPT
+    if user_id or customer_id:
+        prompt += TENANT_PROMPT_EXTENSION.format(
+            user_id=user_id or "",
+            customer_id=customer_id if customer_id is not None else "NULL",
+        )
+    return prompt
 
 
 SQL_GENERATION_PROMPT = """Given the following database schema context:
@@ -163,8 +199,6 @@ IMPORTANT: If a conversation history is provided below, short/vague questions li
 Reply with ONLY one of these three words: ALLOWED, BLOCKED_DESTRUCTIVE, BLOCKED_IRRELEVANT"""
 
 
-
-# AFTER — replace with this tightened version
 FOLLOWUP_DETECTION_PROMPT = """You are analyzing whether a new question depends on the results of a previous query to make sense.
 
 Conversation history:
@@ -214,10 +248,6 @@ Examples of FOLLOW_UP queries:
 Respond with exactly one word: FOLLOW_UP or FRESH"""
 
 
-# =============================================================================
-# SQL_RETRY_PROMPT — used when SQL execution fails and we want the LLM to
-# self-correct based on the exact database error message.
-# =============================================================================
 SQL_RETRY_PROMPT = """You are an expert T-SQL developer for Microsoft SQL Server.
 
 The following SQL query was generated but FAILED when executed against the database.
@@ -251,5 +281,7 @@ Rules:
 - Never use DROP, DELETE, TRUNCATE, ALTER, INSERT, UPDATE or any destructive statements.
 - Always qualify column names with table names/aliases to avoid ambiguity.
 - Use simple aliases only (T1, T2, A1, B1, etc.).
+- IMPORTANT: Preserve any tenant-scoping WHERE conditions (UserId / CustomerId filters)
+  that were in the original query — do NOT remove them when fixing other errors.
 
 Return only the corrected SQL query:"""

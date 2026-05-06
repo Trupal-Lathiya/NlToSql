@@ -1,4 +1,4 @@
-// frontend/src/App.jsx  (REPLACE your existing App.jsx)
+// frontend/src/App.jsx
 import { useState, useEffect } from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { useConversations } from "./hooks/useConversations";
@@ -92,6 +92,7 @@ export default function App() {
                       path="/"
                       element={
                         <ChatPage
+                          user={user}                        {/* ← tenant context */}
                           activeConversationId={activeConversationId}
                           messages={messages}
                           loadingMsgs={loadingMsgs}

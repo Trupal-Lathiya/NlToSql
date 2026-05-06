@@ -1,4 +1,9 @@
-// frontend/src/pages/ChatPage.jsx  (REPLACE your existing ChatPage.jsx)
+// frontend/src/pages/ChatPage.jsx
+//
+// Key multitenancy change: the `user` prop is now accepted and passed to
+// sendQueryStreaming so every query carries the logged-in user's id and
+// customerId to the backend.
+
 import { useState, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { sendQueryStreaming, getFollowupQuestions, saveMessage } from "../services/apiClient";
@@ -6,6 +11,7 @@ import SqlDisplay from "../components/SqlDisplay";
 import ResultsTable from "../components/ResultsTable";
 
 export default function ChatPage({
+  user,                        // ← NEW: logged-in user from App.jsx
   activeConversationId,
   messages,
   loadingMsgs,
@@ -54,7 +60,6 @@ export default function ChatPage({
   // ── Create a new chat if none is active, then send ───────────────────────
   const ensureConversation = async () => {
     if (activeConversationId) return activeConversationId;
-    // No active conversation — create one
     const newId = await onNewChat();
     return newId;
   };
@@ -66,78 +71,73 @@ export default function ChatPage({
     setInput("");
     setLoading(true);
 
-    // Ensure we have a conversation to write to
     const convId = await ensureConversation();
     if (!convId) {
       setLoading(false);
       return;
     }
 
-    const timestamp   = new Date().toTimeString().slice(0, 8);
-    const memoryWindow = getMemoryWindow();  // last 5 successful from THIS conversation
+    const timestamp    = new Date().toTimeString().slice(0, 8);
+    const memoryWindow = getMemoryWindow();
     const memoryCount  = memoryWindow.length;
-
-    // Local id for React state management during streaming
-    const localId = `local-${Date.now()}`;
+    const localId      = `local-${Date.now()}`;
 
     addPlaceholderMessage(localId, query, timestamp, memoryCount);
 
-    // Track result data so we can save it after summary arrives
     let resultData = null;
 
-    sendQueryStreaming(query, memoryWindow, {
-
-      onResult: (data) => {
-        resultData = data;
-        updateMessage(localId, {
-          ...data,
-          nl_query:       query,
-          timestamp,
-          memoryCount,
-          status:         "success",
-          summary:        null,
-          _summaryPending: true,
-        });
-      },
-
-      onSummary: async ({ summary }) => {
-        // Patch summary into UI
-        updateMessage(localId, { summary, _summaryPending: false });
-
-        // ── Save to DB (only on full success, never on error) ─────────────
-        if (resultData) {
-          const saveRes = await saveMessage({
-            conversationId: convId,
-            nlQuery:        query,
-            generatedSql:   resultData.sql,
-            summary:        summary,
-            retrievedTables: resultData.retrieved_tables,
-            columns:        resultData.columns,
-            rows:           resultData.rows,
-            totalRowCount:  resultData.total_row_count,
+    // Pass the logged-in user as the 4th argument so tenant IDs are sent
+    sendQueryStreaming(
+      query,
+      memoryWindow,
+      {
+        onResult: (data) => {
+          resultData = data;
+          updateMessage(localId, {
+            ...data,
+            nl_query:        query,
+            timestamp,
+            memoryCount,
+            status:          "success",
+            summary:         null,
+            _summaryPending: true,
           });
+        },
 
-          // If the backend auto-set the title (first message), update sidebar
-          if (saveRes.status === "success") {
-            // Title is updated on backend; refresh the sidebar title
-            // We derive the new title from the query (same logic as backend: first 80 chars)
-            refreshConversationTitle(convId, query.slice(0, 80));
+        onSummary: async ({ summary }) => {
+          updateMessage(localId, { summary, _summaryPending: false });
+
+          if (resultData) {
+            const saveRes = await saveMessage({
+              conversationId:  convId,
+              nlQuery:         query,
+              generatedSql:    resultData.sql,
+              summary:         summary,
+              retrievedTables: resultData.retrieved_tables,
+              columns:         resultData.columns,
+              rows:            resultData.rows,
+              totalRowCount:   resultData.total_row_count,
+            });
+
+            if (saveRes.status === "success") {
+              refreshConversationTitle(convId, query.slice(0, 80));
+            }
           }
-        }
-      },
+        },
 
-      onDone: () => setLoading(false),
+        onDone: () => setLoading(false),
 
-      onError: (data) => {
-        // Show error in UI but do NOT save to DB
-        updateMessage(localId, {
-          status:         "error",
-          message:        data.message,
-          _summaryPending: false,
-        });
-        setLoading(false);
+        onError: (data) => {
+          updateMessage(localId, {
+            status:          "error",
+            message:         data.message,
+            _summaryPending: false,
+          });
+          setLoading(false);
+        },
       },
-    });
+      user   // ← tenant context passed here
+    );
   };
 
   const handleKeyDown = (e) => {

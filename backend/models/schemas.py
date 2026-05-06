@@ -29,7 +29,12 @@ class ConversationTurn(BaseModel):
 class QueryRequest(BaseModel):
     """Incoming natural language query with optional conversation history"""
     natural_language_query: str
-    conversation_history: Optional[List[ConversationTurn]] = []  # last N turns
+    conversation_history: Optional[List[ConversationTurn]] = []
+    # ── Multitenancy ─────────────────────────────────────────────────────────
+    # The frontend sends these after login. The pipeline uses them to scope
+    # every generated SQL query to the correct user / customer.
+    user_id: Optional[str] = None
+    customer_id: Optional[int] = None
 
 
 class QuerySuccessResponse(BaseModel):
@@ -54,7 +59,7 @@ class QueryErrorResponse(BaseModel):
 
 class ErrorResponse(BaseModel):
     """General error response for other endpoints"""
-    status: Literal["error"] = "error"
+    status: Literal[\"error\"] = "error"
     message: str
 
 

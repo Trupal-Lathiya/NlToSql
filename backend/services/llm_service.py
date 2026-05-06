@@ -3,7 +3,7 @@ import logging
 from groq import Groq
 from config import GROQ_API_KEY, GROQ_MODEL, GROQ_CLASSIFIER_MODEL
 from utils.prompt_templates import (
-    SYSTEM_PROMPT,
+    build_system_prompt,
     SQL_GENERATION_PROMPT,
     SQL_GENERATION_WITH_MEMORY_PROMPT,
     SQL_RETRY_PROMPT,
@@ -49,8 +49,24 @@ def detect_followup(nl_query: str, conversation_history: list) -> bool:
         return False
 
 
-def generate_sql(nl_query: str, schema_context: str, conversation_history: list = None) -> dict:
+def generate_sql(
+    nl_query: str,
+    schema_context: str,
+    conversation_history: list = None,
+    user_id: str = None,
+    customer_id: int = None,
+) -> dict:
+    """
+    Generate SQL for the given NL query.
+
+    When user_id / customer_id are provided, the system prompt is extended
+    with multitenancy rules so the LLM always scopes the query to the
+    correct tenant (user + customer).
+    """
     try:
+        # Build the system prompt — includes tenant rules when IDs are present
+        system = build_system_prompt(user_id=user_id, customer_id=customer_id)
+
         if conversation_history and len(conversation_history) > 0:
             history_text = ""
             for i, turn in enumerate(conversation_history, 1):
@@ -74,7 +90,7 @@ def generate_sql(nl_query: str, schema_context: str, conversation_history: list 
         response = get_client().chat.completions.create(
             model=GROQ_MODEL,
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.1,
@@ -106,26 +122,15 @@ def generate_sql_retry(
     failed_sql: str,
     error_message: str,
     attempt: int,
+    user_id: str = None,
+    customer_id: int = None,
 ) -> dict:
     """
     Ask the LLM to self-correct a previously generated SQL query that failed
-    on execution.  Feeds the exact DB error message back so the model knows
-    exactly what to fix.
-
-    Args:
-        nl_query:       Original natural-language question from the user.
-        schema_context: Same schema context string used in the first generation.
-        failed_sql:     The SQL that was executed and produced the error.
-        error_message:  The raw error string returned by the database.
-        attempt:        Which retry attempt this is (1-based), shown in the prompt.
-
-    Returns:
-        {"status": "success", "sql": "<corrected SQL>"}
-        {"status": "error",   "message": "<reason>"}
+    on execution. Preserves tenant-scoping in corrected query.
     """
     try:
-        # Truncate the error message so we don't blow out the context window.
-        # SQL Server errors repeat the same message many times; 800 chars is plenty.
+        system = build_system_prompt(user_id=user_id, customer_id=customer_id)
         truncated_error = error_message[:800] if len(error_message) > 800 else error_message
 
         prompt = SQL_RETRY_PROMPT.format(
@@ -142,16 +147,15 @@ def generate_sql_retry(
         response = get_client().chat.completions.create(
             model=GROQ_MODEL,
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system},
                 {"role": "user",   "content": prompt},
             ],
-            temperature=0.1,   # keep deterministic
+            temperature=0.1,
             max_tokens=1024,
         )
 
         sql = response.choices[0].message.content.strip()
 
-        # Strip markdown fences if the model adds them despite instructions
         if sql.startswith("```"):
             sql = sql.split("```")[1]
             if sql.lower().startswith("sql"):
@@ -238,7 +242,6 @@ def generate_followup_questions(
 
         raw = response.choices[0].message.content.strip()
 
-        # Strip markdown fences if model wraps it
         if raw.startswith("```"):
             raw = raw.split("```")[1]
             if raw.lower().startswith("json"):
@@ -248,7 +251,6 @@ def generate_followup_questions(
         questions = json.loads(raw)
 
         if isinstance(questions, list):
-            # Sanitise: keep only strings, max 3
             questions = [q for q in questions if isinstance(q, str)][:3]
             logger.info(f"Generated follow-up questions: {questions}")
             return questions

@@ -24,11 +24,143 @@ BLOCKED_SQL_KEYWORDS = [
     r'\bEXECUTE\b', r'\bCREATE\b', r'\bREPLACE\b',
 ]
 
-# ── How many times to ask the LLM to self-correct before giving up ────────────
 MAX_SQL_RETRIES = 2
 
 _classifier_client = Groq(api_key=GROQ_API_KEY)
 
+# ── Column names that carry tenant identity ───────────────────────────────────
+# Lower-cased so matching is case-insensitive.
+_USER_ID_COLUMNS     = {"userid"}
+_CUSTOMER_ID_COLUMNS = {"customerid"}
+
+
+# =============================================================================
+# Multitenancy safety guard
+# =============================================================================
+
+def _inject_tenant_filter(sql: str, schema_context: str, user_id: str, customer_id: int) -> str:
+    """
+    Post-generation safety net.
+
+    Scans the tables referenced in the SQL against the schema context to find
+    which ones have UserId / CustomerId columns, then verifies those filters
+    are already present in the WHERE clause.  If any are missing, it injects
+    them by appending to an existing WHERE or adding a new one.
+
+    This is a best-effort guard — it handles the common cases (flat SELECT,
+    single/multi-table WITH or JOIN) but is not a full SQL parser. The LLM
+    is the primary enforcement mechanism (via the system prompt); this guard
+    catches cases where the LLM failed to add the filter.
+    """
+    if not user_id and customer_id is None:
+        return sql  # no tenant context → nothing to do
+
+    # ── 1. Build a map: table_name_lower → set of tenant column names ────────
+    tenant_cols: dict[str, set] = {}
+    current_table = None
+    for line in schema_context.splitlines():
+        line = line.strip()
+        if line.startswith("Table:"):
+            current_table = line.split("Table:")[-1].strip()
+        elif current_table and line.startswith("-"):
+            # e.g.  "- UserId: varchar (nullable)"
+            col_part = line.lstrip("- ").split(":")[0].strip()
+            col_lower = col_part.lower()
+            if col_lower in _USER_ID_COLUMNS or col_lower in _CUSTOMER_ID_COLUMNS:
+                tenant_cols.setdefault(current_table.lower(), set()).add(col_part)
+
+    if not tenant_cols:
+        return sql  # no tables in the schema have tenant columns
+
+    # ── 2. Find tables actually used in this SQL ─────────────────────────────
+    # Match table names after FROM / JOIN (handles aliases like "FROM Foo T1").
+    table_pattern = re.compile(
+        r'\b(?:FROM|JOIN)\s+([A-Za-z_][A-Za-z0-9_]*)',
+        re.IGNORECASE
+    )
+    used_tables = {m.group(1).lower() for m in table_pattern.finditer(sql)}
+
+    # ── 3. Determine which tenant conditions are needed ──────────────────────
+    needed_user     = False
+    needed_customer = False
+    for tbl in used_tables:
+        cols = tenant_cols.get(tbl, set())
+        for c in cols:
+            if c.lower() in _USER_ID_COLUMNS:
+                needed_user = True
+            if c.lower() in _CUSTOMER_ID_COLUMNS:
+                needed_customer = True
+
+    if not needed_user and not needed_customer:
+        return sql  # none of the used tables have tenant columns
+
+    # ── 4. Check whether the SQL already contains the filters ────────────────
+    sql_upper = sql.upper()
+    has_user_filter     = user_id     and f"USERID = '{user_id.upper()}'" in sql_upper.replace(" ", "")
+    has_customer_filter = customer_id is not None and re.search(
+        rf'\bCUSTOMERID\s*=\s*{customer_id}\b', sql_upper
+    )
+
+    missing_conditions = []
+    if needed_user and user_id and not has_user_filter:
+        missing_conditions.append(f"UserId = '{user_id}'")
+    if needed_customer and customer_id is not None and not has_customer_filter:
+        missing_conditions.append(f"CustomerId = {customer_id}")
+
+    if not missing_conditions:
+        return sql  # all required filters already present
+
+    logger.warning(
+        f"[TENANT GUARD] SQL missing tenant filter(s): {missing_conditions} — injecting."
+    )
+    print(f"           🔒 [TENANT GUARD] Injecting missing filter(s): {missing_conditions}")
+
+    extra_where = " AND ".join(missing_conditions)
+
+    # ── 5. Inject: append to existing WHERE or add new one ───────────────────
+    # Strategy: find the last WHERE clause and append, or find ORDER BY / GROUP BY
+    # / HAVING and insert before it, or append at the very end.
+
+    # Remove trailing semicolon for safe manipulation
+    sql_stripped = sql.rstrip().rstrip(";")
+
+    if re.search(r'\bWHERE\b', sql_stripped, re.IGNORECASE):
+        # Append to existing WHERE.
+        # Insert before the first ORDER BY / GROUP BY / HAVING at top level,
+        # or at the end if none found.
+        injection_point = re.search(
+            r'\b(ORDER\s+BY|GROUP\s+BY|HAVING)\b', sql_stripped, re.IGNORECASE
+        )
+        if injection_point:
+            pos = injection_point.start()
+            sql_stripped = (
+                sql_stripped[:pos].rstrip()
+                + f"\n  AND {extra_where}\n"
+                + sql_stripped[pos:]
+            )
+        else:
+            sql_stripped = sql_stripped + f"\n  AND {extra_where}"
+    else:
+        # No WHERE clause yet — add one before ORDER BY / GROUP BY / HAVING.
+        injection_point = re.search(
+            r'\b(ORDER\s+BY|GROUP\s+BY|HAVING)\b', sql_stripped, re.IGNORECASE
+        )
+        if injection_point:
+            pos = injection_point.start()
+            sql_stripped = (
+                sql_stripped[:pos].rstrip()
+                + f"\nWHERE {extra_where}\n"
+                + sql_stripped[pos:]
+            )
+        else:
+            sql_stripped = sql_stripped + f"\nWHERE {extra_where}"
+
+    return sql_stripped
+
+
+# =============================================================================
+# Existing helpers (unchanged)
+# =============================================================================
 
 def classify_query(nl_query: str, conversation_history: list = None) -> str:
     try:
@@ -155,10 +287,20 @@ def save_csv(columns: list, rows: list, filename: str) -> str:
 
 
 # =============================================================================
-# Shared Steps 1-5 logic (used by both run_pipeline and run_pipeline_streaming)
+# Shared Steps 1-5 logic (now tenant-aware)
 # =============================================================================
 
-def _run_steps_1_to_5(nl_query: str, top_k: int, conversation_history: list):
+def _run_steps_1_to_5(
+    nl_query: str,
+    top_k: int,
+    conversation_history: list,
+    user_id: str = None,
+    customer_id: int = None,
+):
+    """
+    Steps 1–5 of the pipeline. Now accepts user_id / customer_id and threads
+    them into SQL generation so every query is tenant-scoped.
+    """
     # ── Step 1 (PARALLEL): Classify + Embed ──────────────────────────────────
     print(f"\n[STEP 1]   ⚙️  Running classifier + embedding in parallel...")
     with ThreadPoolExecutor(max_workers=2) as executor:
@@ -169,6 +311,8 @@ def _run_steps_1_to_5(nl_query: str, top_k: int, conversation_history: list):
 
     print(f"           ✅ Classification  : {classification}")
     print(f"           ✅ Embedding       : done (dim={len(query_embedding)})")
+    if user_id or customer_id is not None:
+        print(f"           🔒 Tenant context  : userId={user_id!r}  customerId={customer_id}")
 
     if classification == "BLOCKED_DESTRUCTIVE":
         return {"ok": False, "error": "🚫 This assistant is read-only. Queries that delete, update, insert, or modify data are not allowed."}
@@ -188,6 +332,10 @@ def _run_steps_1_to_5(nl_query: str, top_k: int, conversation_history: list):
         print(f"           ⏭️  SKIPPED — cache is DISABLED")
     elif is_followup:
         print(f"           ⏭️  SKIPPED — follow-up query, context may differ")
+    elif user_id or customer_id is not None:
+        # Skip cache for authenticated users — cache entries don't carry tenant
+        # context so a hit from user A could serve data to user B.
+        print(f"           ⏭️  SKIPPED — tenant-scoped query, cache bypassed for safety")
     else:
         cache_hit_entry = find_similar_cache(query_embedding)
         if cache_hit_entry:
@@ -213,7 +361,6 @@ def _run_steps_1_to_5(nl_query: str, top_k: int, conversation_history: list):
     PINECONE_SIMILARITY_THRESHOLD = 0.35
 
     if is_followup and conversation_history:
-        # ── Get previous tables from history ──────────────────────────────────
         previous_tables = None
         for turn in reversed(conversation_history):
             if turn.get("retrieved_tables"):
@@ -223,16 +370,11 @@ def _run_steps_1_to_5(nl_query: str, top_k: int, conversation_history: list):
         if previous_tables:
             print(f"           🔗 Follow-up — loading previous tables : {previous_tables}")
 
-            # ── Also search Pinecone with current query to catch NEW tables ───
-            # e.g. user says "give me their name with asset name" — Asset table
-            # was not in the previous query but is needed now.
             print(f"           🔍 Also searching Pinecone for any NEW tables in this follow-up...")
             try:
                 fresh_matches = search_similar(query_embedding, top_k=top_k)
                 fresh_strong  = [m for m in fresh_matches if m["score"] >= PINECONE_SIMILARITY_THRESHOLD]
                 fresh_ids     = [m["id"] for m in fresh_strong]
-
-                # Only keep truly new tables not already in previous set
                 new_table_ids = [tid for tid in fresh_ids if tid not in previous_tables]
 
                 if new_table_ids:
@@ -244,17 +386,14 @@ def _run_steps_1_to_5(nl_query: str, top_k: int, conversation_history: list):
                 fresh_strong  = []
                 new_table_ids = []
 
-            # ── Fetch schemas for previous tables ─────────────────────────────
             prev_matches = fetch_schemas_by_ids(previous_tables, [])
             if not prev_matches:
                 return {"ok": False, "error": "⚠️ Could not retrieve previous table schemas. Please rephrase your question."}
 
-            # ── Merge previous + new table matches (deduplicated) ─────────────
             already_fetched_ids = [m["id"] for m in prev_matches]
             new_matches         = [m for m in fresh_strong if m["id"] in new_table_ids]
             merged_matches      = prev_matches + new_matches
 
-            # ── Also fetch FK-related tables from the merged set ──────────────
             related_ids   = extract_related_table_ids(merged_matches)
             extra_matches = fetch_schemas_by_ids(related_ids, [m["id"] for m in merged_matches])
             all_matches   = merged_matches + extra_matches
@@ -265,7 +404,12 @@ def _run_steps_1_to_5(nl_query: str, top_k: int, conversation_history: list):
 
             # ── Step 5: Generate SQL with full conversation memory ────────────
             print(f"\n[STEP 5]   🤖 Generating SQL with Groq LLM (follow-up with memory)...")
-            llm_result = generate_sql(nl_query, schema_context, conversation_history=conversation_history)
+            llm_result = generate_sql(
+                nl_query, schema_context,
+                conversation_history=conversation_history,
+                user_id=user_id,
+                customer_id=customer_id,
+            )
             if llm_result["status"] != "success":
                 return {"ok": False, "error": "⚠️ I couldn't generate a valid query for your request. Please try rephrasing your question."}
 
@@ -274,6 +418,9 @@ def _run_steps_1_to_5(nl_query: str, top_k: int, conversation_history: list):
 
             if is_destructive_sql(sql):
                 return {"ok": False, "error": "🚫 This assistant is read-only. Queries that delete, update, insert, or modify data are not allowed."}
+
+            # ── Tenant safety guard ───────────────────────────────────────────
+            sql = _inject_tenant_filter(sql, schema_context, user_id, customer_id)
 
             return {
                 "ok": True,
@@ -287,7 +434,6 @@ def _run_steps_1_to_5(nl_query: str, top_k: int, conversation_history: list):
             }
 
         else:
-            # Follow-up detected but no previous tables found — fall through to normal Pinecone search
             print(f"           ⚠️  Follow-up but no previous tables in history — falling back to Pinecone search")
 
     # ── Fresh query (or follow-up with no history) — search Pinecone normally ─
@@ -317,7 +463,9 @@ def _run_steps_1_to_5(nl_query: str, top_k: int, conversation_history: list):
     llm_result = generate_sql(
         nl_query,
         schema_context,
-        conversation_history=conversation_history if is_followup else None
+        conversation_history=conversation_history if is_followup else None,
+        user_id=user_id,
+        customer_id=customer_id,
     )
     if llm_result["status"] != "success":
         return {"ok": False, "error": "⚠️ I couldn't generate a valid query for your request. Please try rephrasing your question."}
@@ -327,6 +475,9 @@ def _run_steps_1_to_5(nl_query: str, top_k: int, conversation_history: list):
 
     if is_destructive_sql(sql):
         return {"ok": False, "error": "🚫 This assistant is read-only. Queries that delete, update, insert, or modify data are not allowed."}
+
+    # ── Tenant safety guard ───────────────────────────────────────────────────
+    sql = _inject_tenant_filter(sql, schema_context, user_id, customer_id)
 
     return {
         "ok": True,
@@ -338,6 +489,7 @@ def _run_steps_1_to_5(nl_query: str, top_k: int, conversation_history: list):
         "cache_hit_id": None,
         "schema_context": schema_context,
     }
+
 
 # =============================================================================
 # Helper: execute SQL with automatic LLM-driven retry on DB errors
@@ -351,6 +503,8 @@ def _execute_with_retry(
     cache_hit_id: str = None,
     query_embedding: list = None,
     top_k: int = 10,
+    user_id: str = None,
+    customer_id: int = None,
 ) -> tuple[dict, str]:
     RETRYABLE_CODES = {"42000", "42S02", "42S22"}
 
@@ -369,7 +523,6 @@ def _execute_with_retry(
             except Exception as evict_err:
                 logger.error(f"[CACHE] Failed to evict entry: {evict_err}")
 
-            # ── No schema context from cache — re-run Steps 4 & 5 fresh ──────
             if not schema_context and query_embedding:
                 print(f"           🔄 Cache hit had no schema — re-fetching tables and regenerating SQL...")
                 logger.info("[RETRY] Re-running Steps 4+5 after bad cache eviction.")
@@ -385,9 +538,14 @@ def _execute_with_retry(
                         schema_context = build_schema_context(all_matches)
                         print(f"           ✅ Schema re-fetched for tables: {[m['id'] for m in all_matches]}")
 
-                        llm_result = generate_sql(nl_query, schema_context)
+                        llm_result = generate_sql(
+                            nl_query, schema_context,
+                            user_id=user_id, customer_id=customer_id,
+                        )
                         if llm_result["status"] == "success" and not is_destructive_sql(llm_result["sql"]):
-                            current_sql = llm_result["sql"]
+                            current_sql = _inject_tenant_filter(
+                                llm_result["sql"], schema_context, user_id, customer_id
+                            )
                             print(f"           ✅ Fresh SQL generated : {current_sql[:100]}{'...' if len(current_sql) > 100 else ''}")
                             db_result = execute_query(current_sql)
                             if db_result["status"] == "success":
@@ -423,6 +581,8 @@ def _execute_with_retry(
             failed_sql=current_sql,
             error_message=raw_msg,
             attempt=attempt,
+            user_id=user_id,
+            customer_id=customer_id,
         )
 
         if retry_result["status"] != "success":
@@ -436,6 +596,8 @@ def _execute_with_retry(
             db_result = {"status": "error", "message": "🚫 Retry produced a destructive query — aborted."}
             break
 
+        # Re-apply tenant guard on corrected SQL too
+        corrected_sql = _inject_tenant_filter(corrected_sql, schema_context, user_id, customer_id)
         current_sql = corrected_sql
         print(f"           🗄️  Executing corrected SQL (attempt {attempt})...")
         db_result = execute_query(current_sql)
@@ -450,18 +612,29 @@ def _execute_with_retry(
 
 
 # =============================================================================
-# Original blocking pipeline (unchanged — kept for /query endpoint)
+# Blocking pipeline
 # =============================================================================
 
-def run_pipeline(nl_query: str, top_k: int = 10, conversation_history: list = None) -> dict:
+def run_pipeline(
+    nl_query: str,
+    top_k: int = 10,
+    conversation_history: list = None,
+    user_id: str = None,
+    customer_id: int = None,
+) -> dict:
     try:
         print("\n" + "="*60)
         print(f"🚀 PIPELINE STARTED")
-        print(f"   Query : {nl_query}")
-        print(f"   Cache : {'ENABLED' if CACHE_ENABLED else 'DISABLED'}")
+        print(f"   Query      : {nl_query}")
+        print(f"   Cache      : {'ENABLED' if CACHE_ENABLED else 'DISABLED'}")
+        if user_id or customer_id is not None:
+            print(f"   Tenant     : userId={user_id!r}  customerId={customer_id}")
         print("="*60)
 
-        prep = _run_steps_1_to_5(nl_query, top_k, conversation_history)
+        prep = _run_steps_1_to_5(
+            nl_query, top_k, conversation_history,
+            user_id=user_id, customer_id=customer_id,
+        )
         if not prep["ok"]:
             return {"status": "error", "message": prep["error"]}
 
@@ -470,12 +643,14 @@ def run_pipeline(nl_query: str, top_k: int = 10, conversation_history: list = No
         is_followup      = prep["is_followup"]
         schema_context   = prep.get("schema_context", "")
 
-        # ── Step 6: Execute SQL (with automatic retry on SQL errors) ──────────
+        # ── Step 6: Execute SQL ───────────────────────────────────────────────
         print(f"\n[STEP 6]   🗄️  Executing SQL on database...")
         db_result, sql = _execute_with_retry(
             nl_query, sql, schema_context,
             cache_hit_id=prep.get("cache_hit_id"),
             query_embedding=prep.get("query_embedding"),
+            user_id=user_id,
+            customer_id=customer_id,
         )
 
         if db_result["status"] != "success":
@@ -493,10 +668,11 @@ def run_pipeline(nl_query: str, top_k: int = 10, conversation_history: list = No
         total_rows   = len(all_rows)
         print(f"           ✅ Executed — {total_rows} row(s) returned, {len(columns)} column(s)")
 
-        # ── Cache write AFTER confirmed DB success ────────────────────────────
+        # ── Cache write — only for anonymous (non-tenant) queries ─────────────
         print(f"\n[CACHE]    💾 Cache Write Check")
-        if not CACHE_ENABLED or prep.get("cache_hit"):
-            print(f"           ⏭️  SKIPPED")
+        if not CACHE_ENABLED or prep.get("cache_hit") or user_id or customer_id is not None:
+            reason = "DISABLED" if not CACHE_ENABLED else ("HIT" if prep.get("cache_hit") else "tenant query — not cached")
+            print(f"           ⏭️  SKIPPED ({reason})")
         else:
             stored = store_in_cache(
                 question=nl_query,
@@ -544,11 +720,18 @@ def run_pipeline(nl_query: str, top_k: int = 10, conversation_history: list = No
         print("="*60 + "\n")
         return {"status": "error", "message": "⚠️ Something went wrong while processing your request. Please try again."}
 
+
 # =============================================================================
-# NEW: Streaming pipeline — Steps 6 & 7 run in parallel via SSE
+# Streaming pipeline
 # =============================================================================
 
-async def run_pipeline_streaming(nl_query: str, top_k: int = 10, conversation_history: list = None):
+async def run_pipeline_streaming(
+    nl_query: str,
+    top_k: int = 10,
+    conversation_history: list = None,
+    user_id: str = None,
+    customer_id: int = None,
+):
     import json
 
     def _emit(event: str, data: dict) -> str:
@@ -562,6 +745,8 @@ async def run_pipeline_streaming(nl_query: str, top_k: int = 10, conversation_hi
         print("\n" + "="*60)
         print(f"🚀 PIPELINE (STREAMING) STARTED")
         print(f"   Query : {nl_query}")
+        if user_id or customer_id is not None:
+            print(f"   Tenant: userId={user_id!r}  customerId={customer_id}")
         print("="*60)
 
         loop = asyncio.get_event_loop()
@@ -569,7 +754,11 @@ async def run_pipeline_streaming(nl_query: str, top_k: int = 10, conversation_hi
 
         # ── Steps 1-5 ─────────────────────────────────────────────────────────
         prep = await loop.run_in_executor(
-            executor, _run_steps_1_to_5, nl_query, top_k, conversation_history
+            executor,
+            lambda: _run_steps_1_to_5(
+                nl_query, top_k, conversation_history,
+                user_id=user_id, customer_id=customer_id,
+            )
         )
 
         if not prep["ok"]:
@@ -582,7 +771,7 @@ async def run_pipeline_streaming(nl_query: str, top_k: int = 10, conversation_hi
         is_followup      = prep["is_followup"]
         schema_context   = prep.get("schema_context", "")
 
-        # ── Step 6: Execute SQL (with automatic retry on SQL errors) ──────────
+        # ── Step 6: Execute SQL ───────────────────────────────────────────────
         print(f"\n[STEP 6]   🗄️  Executing SQL on database...")
         db_result, sql = await loop.run_in_executor(
             executor,
@@ -590,6 +779,8 @@ async def run_pipeline_streaming(nl_query: str, top_k: int = 10, conversation_hi
                 nl_query, sql, schema_context,
                 cache_hit_id=prep.get("cache_hit_id"),
                 query_embedding=prep.get("query_embedding"),
+                user_id=user_id,
+                customer_id=customer_id,
             )
         )
 
@@ -611,10 +802,11 @@ async def run_pipeline_streaming(nl_query: str, top_k: int = 10, conversation_hi
         total_rows   = len(all_rows)
         print(f"           ✅ Executed — {total_rows} row(s) returned, {len(columns)} column(s)")
 
-        # ── Cache write AFTER confirmed DB success ────────────────────────────
+        # ── Cache write — only for anonymous queries ───────────────────────────
         print(f"\n[CACHE]    💾 Cache Write Check")
-        if not CACHE_ENABLED or prep.get("cache_hit"):
-            print(f"           ⏭️  SKIPPED")
+        if not CACHE_ENABLED or prep.get("cache_hit") or user_id or customer_id is not None:
+            reason = "DISABLED" if not CACHE_ENABLED else ("HIT" if prep.get("cache_hit") else "tenant query — not cached")
+            print(f"           ⏭️  SKIPPED ({reason})")
         else:
             stored = store_in_cache(
                 question=nl_query,
