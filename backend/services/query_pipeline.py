@@ -37,7 +37,7 @@ _CUSTOMER_ID_COLUMNS = {"customerid"}
 # Multitenancy safety guard
 # =============================================================================
 
-def _inject_tenant_filter(sql: str, schema_context: str, user_id: str, customer_id: int) -> str:
+def _inject_tenant_filter(sql: str, schema_context: str, user_id: str, customer_id: int, is_super_user: bool = False) -> str:
     """
     Post-generation safety net.
 
@@ -51,6 +51,10 @@ def _inject_tenant_filter(sql: str, schema_context: str, user_id: str, customer_
     is the primary enforcement mechanism (via the system prompt); this guard
     catches cases where the LLM failed to add the filter.
     """
+    # ✅ SuperUsers bypass all tenant filtering — full DB access
+    if is_super_user:
+        return sql
+
     if not user_id and customer_id is None:
         return sql  # no tenant context → nothing to do
 
@@ -285,6 +289,7 @@ def _run_steps_1_to_5(
     conversation_history: list,
     user_id: str = None,
     customer_id: int = None,
+    is_super_user: bool = False,  # ✅ NEW
 ):
     """
     Steps 1–5 of the pipeline. Threads user_id / customer_id into SQL generation
@@ -305,7 +310,10 @@ def _run_steps_1_to_5(
 
     print(f"           ✅ Classification  : {classification}")
     print(f"           ✅ Embedding       : done (dim={len(query_embedding)})")
-    if user_id or customer_id is not None:
+    # ✅ Updated log to reflect superuser mode
+    if is_super_user:
+        print(f"           👑 SuperUser mode  : full DB access, no tenant filtering")
+    elif user_id or customer_id is not None:
         print(f"           🔒 Tenant context  : userId={user_id!r}  customerId={customer_id}")
     else:
         print(f"           👑 Admin mode      : no tenant filtering")
@@ -410,6 +418,7 @@ def _run_steps_1_to_5(
                 conversation_history=conversation_history,
                 user_id=user_id,
                 customer_id=customer_id,
+                is_super_user=is_super_user,  # ✅ NEW
             )
             if llm_result["status"] != "success":
                 return {"ok": False, "error": "⚠️ I couldn't generate a valid query for your request. Please try rephrasing your question."}
@@ -421,7 +430,7 @@ def _run_steps_1_to_5(
                 return {"ok": False, "error": "🚫 This assistant is read-only. Queries that delete, update, insert, or modify data are not allowed."}
 
             # ── Tenant safety guard ───────────────────────────────────────────
-            sql = _inject_tenant_filter(sql, schema_context, user_id, customer_id)
+            sql = _inject_tenant_filter(sql, schema_context, user_id, customer_id, is_super_user)  # ✅ NEW
 
             return {
                 "ok": True,
@@ -467,6 +476,7 @@ def _run_steps_1_to_5(
         conversation_history=conversation_history if is_followup else None,
         user_id=user_id,
         customer_id=customer_id,
+        is_super_user=is_super_user,  # ✅ NEW
     )
     if llm_result["status"] != "success":
         return {"ok": False, "error": "⚠️ I couldn't generate a valid query for your request. Please try rephrasing your question."}
@@ -478,7 +488,7 @@ def _run_steps_1_to_5(
         return {"ok": False, "error": "🚫 This assistant is read-only. Queries that delete, update, insert, or modify data are not allowed."}
 
     # ── Tenant safety guard ───────────────────────────────────────────────────
-    sql = _inject_tenant_filter(sql, schema_context, user_id, customer_id)
+    sql = _inject_tenant_filter(sql, schema_context, user_id, customer_id, is_super_user)  # ✅ NEW
 
     return {
         "ok": True,
@@ -506,6 +516,7 @@ def _execute_with_retry(
     top_k: int = 10,
     user_id: str = None,
     customer_id: int = None,
+    is_super_user: bool = False,  # ✅ NEW
 ) -> tuple:
     RETRYABLE_CODES = {"42000", "42S02", "42S22"}
 
@@ -543,10 +554,11 @@ def _execute_with_retry(
                         llm_result = generate_sql(
                             nl_query, schema_context,
                             user_id=user_id, customer_id=customer_id,
+                            is_super_user=is_super_user,  # ✅ NEW
                         )
                         if llm_result["status"] == "success" and not is_destructive_sql(llm_result["sql"]):
                             current_sql = _inject_tenant_filter(
-                                llm_result["sql"], schema_context, user_id, customer_id
+                                llm_result["sql"], schema_context, user_id, customer_id, is_super_user  # ✅ NEW
                             )
                             print(f"           ✅ Fresh SQL generated : {current_sql[:100]}{'...' if len(current_sql) > 100 else ''}")
                             db_result = execute_query(current_sql)
@@ -585,6 +597,7 @@ def _execute_with_retry(
             attempt=attempt,
             user_id=user_id,
             customer_id=customer_id,
+            is_super_user=is_super_user,  # ✅ NEW
         )
 
         if retry_result["status"] != "success":
@@ -599,7 +612,7 @@ def _execute_with_retry(
             break
 
         # Re-apply tenant guard on corrected SQL too
-        corrected_sql = _inject_tenant_filter(corrected_sql, schema_context, user_id, customer_id)
+        corrected_sql = _inject_tenant_filter(corrected_sql, schema_context, user_id, customer_id, is_super_user)  # ✅ NEW
         current_sql = corrected_sql
         print(f"           🗄️  Executing corrected SQL (attempt {attempt})...")
         db_result = execute_query(current_sql)
@@ -623,13 +636,17 @@ def run_pipeline(
     conversation_history: list = None,
     user_id: str = None,
     customer_id: int = None,
+    is_super_user: bool = False,  # ✅ NEW
 ) -> dict:
     try:
         print("\n" + "="*60)
         print(f"🚀 PIPELINE STARTED")
         print(f"   Query      : {nl_query}")
         print(f"   Cache      : {'ENABLED' if CACHE_ENABLED else 'DISABLED'}")
-        if user_id or customer_id is not None:
+        # ✅ Updated log to reflect superuser mode
+        if is_super_user:
+            print(f"   Role       : SuperUser (full access, no tenant filter)")
+        elif user_id or customer_id is not None:
             print(f"   Tenant     : userId={user_id!r}  customerId={customer_id}")
         else:
             print(f"   Role       : Admin (full access, no tenant filter)")
@@ -638,6 +655,7 @@ def run_pipeline(
         prep = _run_steps_1_to_5(
             nl_query, top_k, conversation_history,
             user_id=user_id, customer_id=customer_id,
+            is_super_user=is_super_user,  # ✅ NEW
         )
         if not prep["ok"]:
             return {"status": "error", "message": prep["error"]}
@@ -655,6 +673,7 @@ def run_pipeline(
             query_embedding=prep.get("query_embedding"),
             user_id=user_id,
             customer_id=customer_id,
+            is_super_user=is_super_user,  # ✅ NEW
         )
 
         if db_result["status"] != "success":
@@ -745,6 +764,7 @@ async def run_pipeline_streaming(
     conversation_history: list = None,
     user_id: str = None,
     customer_id: int = None,
+    is_super_user: bool = False,  # ✅ NEW
 ):
     import json
 
@@ -759,7 +779,10 @@ async def run_pipeline_streaming(
         print("\n" + "="*60)
         print(f"🚀 PIPELINE (STREAMING) STARTED")
         print(f"   Query : {nl_query}")
-        if user_id or customer_id is not None:
+        # ✅ Updated log to reflect superuser mode
+        if is_super_user:
+            print(f"   Role  : SuperUser (full access, no tenant filter)")
+        elif user_id or customer_id is not None:
             print(f"   Tenant: userId={user_id!r}  customerId={customer_id}")
         else:
             print(f"   Role  : Admin (full access, no tenant filter)")
@@ -774,6 +797,7 @@ async def run_pipeline_streaming(
             lambda: _run_steps_1_to_5(
                 nl_query, top_k, conversation_history,
                 user_id=user_id, customer_id=customer_id,
+                is_super_user=is_super_user,  # ✅ NEW
             )
         )
 
@@ -797,6 +821,7 @@ async def run_pipeline_streaming(
                 query_embedding=prep.get("query_embedding"),
                 user_id=user_id,
                 customer_id=customer_id,
+                is_super_user=is_super_user,  # ✅ NEW
             )
         )
 

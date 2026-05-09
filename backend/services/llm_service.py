@@ -55,6 +55,7 @@ def generate_sql(
     conversation_history: list = None,
     user_id: str = None,
     customer_id: int = None,
+    is_super_user: bool = False,
 ) -> dict:
     """
     Generate SQL for the given NL query.
@@ -65,7 +66,7 @@ def generate_sql(
     """
     try:
         # Build the system prompt — includes tenant rules when IDs are present
-        system = build_system_prompt(user_id=user_id, customer_id=customer_id)
+        system = build_system_prompt(user_id=user_id, customer_id=customer_id,is_super_user=is_super_user)
 
         if conversation_history and len(conversation_history) > 0:
             history_text = ""
@@ -124,13 +125,14 @@ def generate_sql_retry(
     attempt: int,
     user_id: str = None,
     customer_id: int = None,
+    is_super_user: bool = False,
 ) -> dict:
     """
     Ask the LLM to self-correct a previously generated SQL query that failed
     on execution. Preserves tenant-scoping in corrected query.
     """
     try:
-        system = build_system_prompt(user_id=user_id, customer_id=customer_id)
+        system = build_system_prompt(user_id=user_id, customer_id=customer_id,is_super_user=is_super_user)
         truncated_error = error_message[:800] if len(error_message) > 800 else error_message
 
         prompt = SQL_RETRY_PROMPT.format(

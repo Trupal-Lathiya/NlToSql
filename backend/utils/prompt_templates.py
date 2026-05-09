@@ -83,13 +83,20 @@ Rules for tenant filtering:
 """
 
 
-def build_system_prompt(user_id: str = None, customer_id: int = None) -> str:
+def build_system_prompt(
+    user_id: str = None,
+    customer_id: int = None,
+    is_super_user: bool = False,   # ✅ NEW
+) -> str:
     """
     Returns the full system prompt.
-    When tenant credentials are provided, appends the multitenancy rules
-    so the LLM always scopes every generated query to the correct tenant.
+    SuperUsers get no tenant filter — they have full DB access.
+    Regular users get the multitenancy rules appended.
     """
     prompt = SYSTEM_PROMPT
+    # ✅ SuperUsers bypass all tenant filtering
+    if is_super_user:
+        return prompt
     if user_id or customer_id:
         prompt += TENANT_PROMPT_EXTENSION.format(
             user_id=user_id or "",

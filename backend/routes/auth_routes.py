@@ -158,13 +158,16 @@ def login(req: LoginRequest):
         logger.info(f"CHECK_PASSWORD=false → user '{username}' granted access without password check")
 
     # 3. Success
+    # In the login() route, replace the return statement:
+
     return AuthSuccessResponse(
         message="Login successful.",
         user={
             "id":          user["id"],
             "username":    user["username"],
             "email":       user["email"],
-            "customerId":  user["customer_id"],
+            # ✅ SuperUsers get null customerId — they have full DB access
+            "customerId":  None if user["is_super_user"] else user["customer_id"],
             "profileName": user["profile_name"] or user["username"],
             "isSuperUser": user["is_super_user"],
         },

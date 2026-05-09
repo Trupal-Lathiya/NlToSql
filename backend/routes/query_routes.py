@@ -39,46 +39,26 @@ def get_followup_questions(request: FollowupRequest):
 
 @router.post("/stream")
 async def handle_query_stream(request: QueryRequest):
-    """
-    Streaming variant of /query using Server-Sent Events (SSE).
-
-    Yields events as: data: {"event": "...", "data": {...}}\\n\\n
-
-    Event types:
-      result  — DB rows ready (sent immediately after SQL executes)
-      summary — LLM summary ready (sent when summary generation finishes)
-      done    — stream complete
-      error   — something went wrong
-    """
     async def event_generator():
         async for chunk in run_pipeline_streaming(
             nl_query=request.natural_language_query,
             conversation_history=[turn.dict() for turn in (request.conversation_history or [])],
             user_id=request.user_id,
             customer_id=request.customer_id,
+            is_super_user=request.is_super_user or False,   # ✅ NEW
         ):
             yield chunk
-
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        }
-    )
+    return StreamingResponse(event_generator(), media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @router.post("", response_model=QueryResponse)
 def handle_query(request: QueryRequest):
-    """
-    Accepts natural language query + optional conversation history,
-    returns SQL + results or error.
-    """
     result = run_pipeline(
         nl_query=request.natural_language_query,
         conversation_history=[turn.dict() for turn in (request.conversation_history or [])],
         user_id=request.user_id,
         customer_id=request.customer_id,
+        is_super_user=request.is_super_user or False,   # ✅ NEW
     )
     return result

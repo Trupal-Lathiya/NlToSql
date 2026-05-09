@@ -18,11 +18,9 @@ class QueryRequest(BaseModel):
     """Incoming natural language query with optional conversation history"""
     natural_language_query: str
     conversation_history: Optional[List[ConversationTurn]] = []
-    # ── Multitenancy ─────────────────────────────────────────────────────────
-    # The frontend sends these after login. The pipeline uses them to scope
-    # every generated SQL query to the correct user / customer.
     user_id: Optional[str] = None
     customer_id: Optional[int] = None
+    is_super_user: Optional[bool] = False   # ✅ NEW — superusers bypass tenant filtering
 
 
 class QuerySuccessResponse(BaseModel):

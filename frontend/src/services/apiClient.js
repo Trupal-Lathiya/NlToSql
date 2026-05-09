@@ -118,9 +118,12 @@ export async function deleteConversation(conversationId) {
  */
 function _tenantFields(user) {
   if (!user) return {};
+  const isSuperUser = user.isSuperUser === true;
   return {
     user_id: user.id || null,
-    customer_id: user.customerId != null ? user.customerId : null,
+    // ✅ SuperUsers send null customerId — backend uses isSuperUser flag
+    customer_id: isSuperUser ? null : (user.customerId != null ? user.customerId : null),
+    is_super_user: isSuperUser,   // ✅ NEW — backend uses this to skip tenant filtering
   };
 }
 
